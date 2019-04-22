@@ -1,16 +1,16 @@
-Sample Data Store for Fess [![Build Status](https://travis-ci.org/codelibs/fess-ds-sample.svg?branch=master)](https://travis-ci.org/codelibs/fess-ds-sample)
+Box Data Store for Fess [![Build Status](https://travis-ci.org/codelibs/fess-ds-box.svg?branch=master)](https://travis-ci.org/codelibs/fess-ds-box)
 ==========================
 
 ## Overview
 
-Sample Data Store is an extension for Fess Data Store Crawling.
+Box Data Store is an extension for Fess Data Store Crawling.
 
 ## Download
 
-See [Maven Repository](http://central.maven.org/maven2/org/codelibs/fess/fess-ds-sample/).
+See [Maven Repository](http://central.maven.org/maven2/org/codelibs/fess/fess-ds-box/).
 
 ## Installation
 
-1. Download fess-ds-sample-X.X.X.jar
-2. Copy fess-ds-sample-X.X.X.jar to $FESS\_HOME/app/WEB-INF/lib or /usr/share/fess/app/WEB-INF/lib
+1. Download fess-ds-box-X.X.X.jar
+2. Copy fess-ds-box-X.X.X.jar to $FESS\_HOME/app/WEB-INF/lib or /usr/share/fess/app/WEB-INF/lib
 

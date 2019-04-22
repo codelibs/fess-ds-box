@@ -1,5 +1,5 @@
 /*
- * Copyright 2012-2018 CodeLibs Project and the Others.
+ * Copyright 2012-2019 CodeLibs Project and the Others.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,13 +13,13 @@
  * either express or implied. See the License for the specific language
  * governing permissions and limitations under the License.
  */
-package org.codelibs.fess.ds.sample
+package org.codelibs.fess.ds.box
 
 import org.codelibs.fess.util.ComponentUtil
 import org.dbflute.utflute.lastadi.ContainerTestCase
 
-class SampleDataStoreTest : ContainerTestCase() {
-    private lateinit var dataStore: SampleDataStore
+class BoxDataStoreTest : ContainerTestCase() {
+    private lateinit var dataStore: BoxDataStore
 
     override fun prepareConfigFile(): String = "test_app.xml"
     override fun isSuppressTestCaseTransaction(): Boolean = true
@@ -27,7 +27,7 @@ class SampleDataStoreTest : ContainerTestCase() {
     @Throws(Exception::class)
     override fun setUp() {
         super.setUp()
-        dataStore = SampleDataStore()
+        dataStore = BoxDataStore()
     }
 
     @Throws(Exception::class)

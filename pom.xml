@@ -4,9 +4,9 @@
 	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
 	<modelVersion>4.0.0</modelVersion>
 	<groupId>org.codelibs.fess</groupId>
-	<artifactId>fess-ds-sample</artifactId>
+	<artifactId>fess-ds-box</artifactId>
 	<packaging>jar</packaging>
-	<name>Sample Data Store</name>
+	<name>Box Data Store</name>
 	<version>12.5.0-SNAPSHOT</version>
 	<url>https://fess.codelibs.org/</url>
 	<inceptionYear>2009</inceptionYear>
@@ -25,9 +25,9 @@
 		<url>https://github.com/codelibs/fess/issues</url>
 	</issueManagement>
 	<scm>
-		<connection>scm:git:git@github.com:codelibs/fess-ds-sample.git</connection>
-		<developerConnection>scm:git:git@github.com:codelibs/fess-ds-sample.git</developerConnection>
-		<url>https://github.com/codelibs/fess-ds-sample</url>
+		<connection>scm:git:git@github.com:codelibs/fess-ds-box.git</connection>
+		<developerConnection>scm:git:git@github.com:codelibs/fess-ds-box.git</developerConnection>
+		<url>https://github.com/codelibs/fess-ds-box</url>
 	</scm>
 	<parent>
 		<groupId>org.sonatype.oss</groupId>
@@ -169,7 +169,7 @@
 				<configuration>
 					<header>https://www.codelibs.org/assets/license/header.txt</header>
 					<properties>
-						<year>2018</year>
+						<year>2019</year>
 					</properties>
 					<includes>
 						<include>src/**/*.java</include>
