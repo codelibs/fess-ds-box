@@ -16,9 +16,9 @@
 package org.codelibs.fess.ds.box
 
 import org.codelibs.fess.util.ComponentUtil
-import org.dbflute.utflute.lastadi.ContainerTestCase
+import org.dbflute.utflute.lastaflute.LastaFluteTestCase
 
-class BoxDataStoreTest : ContainerTestCase() {
+class BoxDataStoreTest : LastaFluteTestCase() {
     private lateinit var dataStore: BoxDataStore
 
     override fun prepareConfigFile(): String = "test_app.xml"
