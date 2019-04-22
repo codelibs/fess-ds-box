@@ -58,6 +58,7 @@
 		<jackson.version>2.8.11</jackson.version>
 		<commons.fileupload.version>1.3.3</commons.fileupload.version>
 		<asm.version>5.1</asm.version>
+		<box.version>2.31.0</box.version>
 
 		<!-- Testing -->
 		<junit.version>4.12</junit.version>
@@ -291,6 +292,11 @@
 			<artifactId>utflute-lastaflute</artifactId>
 			<version>${utflute.version}</version>
 			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>com.box</groupId>
+			<artifactId>box-java-sdk</artifactId>
+			<version>${box.version}</version>
 		</dependency>
 	</dependencies>
 </project>
