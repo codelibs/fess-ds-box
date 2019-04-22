@@ -18,26 +18,35 @@ package org.codelibs.fess.ds.box
 import org.codelibs.fess.util.ComponentUtil
 import org.dbflute.utflute.lastaflute.LastaFluteTestCase
 
+
 class BoxDataStoreTest : LastaFluteTestCase() {
+
+    companion object {
+        const val CLIENT_ID = ""
+        const val CLIENT_SECRET = ""
+        const val PUBLIC_KEY_ID = ""
+        const val PRIVATE_KEY = ""
+        const val PASSPHRASE = ""
+        const val ENTERPRISE_ID = ""
+    }
+
     private lateinit var dataStore: BoxDataStore
 
     override fun prepareConfigFile(): String = "test_app.xml"
     override fun isSuppressTestCaseTransaction(): Boolean = true
 
-    @Throws(Exception::class)
     override fun setUp() {
         super.setUp()
         dataStore = BoxDataStore()
     }
 
-    @Throws(Exception::class)
     override fun tearDown() {
         ComponentUtil.setFessConfig(null)
         super.tearDown()
     }
 
-    fun test_xxx() {
-        // TODO
-        assertTrue(true)
+    fun testAPIConnection() {
+        dataStore.getAPIConnection(PUBLIC_KEY_ID, PASSPHRASE, PRIVATE_KEY, CLIENT_ID, CLIENT_SECRET, ENTERPRISE_ID)
     }
+
 }
