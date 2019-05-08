@@ -15,12 +15,9 @@
  */
 package org.codelibs.fess.ds.box;
 
-import org.codelibs.fess.util.ComponentUtil;
 import org.dbflute.utflute.lastaflute.LastaFluteTestCase;
 
-public class BoxDataStoreTest extends LastaFluteTestCase {
-
-    private BoxDataStore dataStore;
+public class BoxClientTest extends LastaFluteTestCase {
 
     @Override
     public String prepareConfigFile() {
@@ -30,18 +27,6 @@ public class BoxDataStoreTest extends LastaFluteTestCase {
     @Override
     public boolean isSuppressTestCaseTransaction() {
         return true;
-    }
-
-    @Override
-    public void setUp() throws Exception {
-        super.setUp();
-        dataStore = new BoxDataStore();
-    }
-
-    @Override
-    public void tearDown() throws Exception {
-        ComponentUtil.setFessConfig(null);
-        super.tearDown();
     }
 
     public void test() {
