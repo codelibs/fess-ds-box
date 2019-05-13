@@ -36,6 +36,7 @@ public class BoxClient implements AutoCloseable {
 
     private static final Logger logger = LoggerFactory.getLogger(BoxClient.class);
 
+    protected static final String BASE_URL = "base_url";
     protected static final String CLIENT_ID_PARAM = "client_id";
     protected static final String CLIENT_SECRET_PARAM = "client_secret";
     protected static final String PUBLIC_KEY_ID_PARAM = "public_key_id";
@@ -47,13 +48,19 @@ public class BoxClient implements AutoCloseable {
     protected static final String PROXY_PORT = "proxy_port";
     protected static final String MAX_CACHED_CONTENT_SIZE = "max_cached_content_size";
 
+    protected static final String ITEM_TYPE_FILE = "file";
+    protected static final String ITEM_TYPE_FOLDER = "folder";
+
     protected final Map<String, String> params;
     protected final BoxAPIConnection connection;
 
     protected int maxCachedContentSize = 1024 * 1024;
 
+    protected final String baseUrl;
+
     public BoxClient(final Map<String, String> params) {
         this.params = params;
+        this.baseUrl = params.getOrDefault(BASE_URL, "https://app.box.com");
         this.connection = newConnection();
         final String size = params.get(MAX_CACHED_CONTENT_SIZE);
         if (StringUtil.isNotBlank(size)) {
@@ -95,6 +102,10 @@ public class BoxClient implements AutoCloseable {
     @Override
     public void close() {
         connection.revokeToken();
+    }
+
+    public String getBaseUrl() {
+        return baseUrl;
     }
 
     public void getUsers(final Consumer<BoxUser> consumer) {
@@ -145,11 +156,34 @@ public class BoxClient implements AutoCloseable {
         // TODO use getChildrenRange()
         folder.getChildren().forEach(info -> {
             switch (info.getType()) {
-            case "file":
+            case ITEM_TYPE_FILE:
                 consumer.accept(new BoxFile(connection, info.getID()));
                 break;
-            case "folder":
+            case ITEM_TYPE_FOLDER:
                 getFiles(getFolder(info.getID()), userId, consumer);
+                break;
+            }
+        });
+    }
+
+    public void getItems(final BoxFolder folder, final Consumer<BoxItem> consumer) {
+        getItems(folder, null, consumer);
+    }
+
+    public void getItems(final BoxFolder folder, final String userId, final Consumer<BoxItem> consumer) {
+        if (StringUtil.isNotBlank(userId)) {
+            connection.asUser(userId);
+        }
+        // TODO use getChildrenRange()
+        folder.getChildren().forEach(info -> {
+            switch (info.getType()) {
+            case ITEM_TYPE_FILE:
+                consumer.accept(new BoxFile(connection, info.getID()));
+                break;
+            case ITEM_TYPE_FOLDER:
+                final BoxFolder childFolder = getFolder(info.getID(), userId);
+                consumer.accept(childFolder);
+                getItems(childFolder, userId, consumer);
                 break;
             }
         });
