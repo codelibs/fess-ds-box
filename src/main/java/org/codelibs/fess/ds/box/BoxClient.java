@@ -16,14 +16,21 @@
 package org.codelibs.fess.ds.box;
 
 import com.box.sdk.*;
+import org.apache.commons.io.output.DeferredFileOutputStream;
+import org.apache.commons.lang3.SystemUtils;
 import org.codelibs.core.lang.StringUtil;
+import org.codelibs.fess.crawler.exception.CrawlingAccessException;
+import org.codelibs.fess.crawler.util.TemporaryFileInputStream;
 import org.codelibs.fess.exception.DataStoreException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.net.Proxy;
 import java.util.Map;
+import java.util.function.Consumer;
 
 public class BoxClient implements AutoCloseable {
 
@@ -40,27 +47,21 @@ public class BoxClient implements AutoCloseable {
     protected static final String PROXY_PORT = "proxy_port";
     protected static final String MAX_CACHED_CONTENT_SIZE = "max_cached_content_size";
 
-    protected BoxAPIConnection connection;
     protected final Map<String, String> params;
+    protected final BoxAPIConnection connection;
 
     protected int maxCachedContentSize = 1024 * 1024;
 
     public BoxClient(final Map<String, String> params) {
         this.params = params;
+        this.connection = newConnection();
         final String size = params.get(MAX_CACHED_CONTENT_SIZE);
         if (StringUtil.isNotBlank(size)) {
             maxCachedContentSize = Integer.parseInt(size);
         }
     }
 
-    protected BoxAPIConnection getConnection() {
-        if (connection == null) {
-            connection = newConnection();
-        }
-        return connection;
-    }
-
-    protected BoxDeveloperEditionAPIConnection newConnection() {
+    protected BoxAPIConnection newConnection() {
         final String clientId = params.getOrDefault(CLIENT_ID_PARAM, StringUtil.EMPTY);
         final String clientSecret = params.getOrDefault(CLIENT_SECRET_PARAM, StringUtil.EMPTY);
         final String publicKeyId = params.getOrDefault(PUBLIC_KEY_ID_PARAM, StringUtil.EMPTY);
@@ -93,8 +94,79 @@ public class BoxClient implements AutoCloseable {
 
     @Override
     public void close() {
-        if (connection != null) {
-            connection.revokeToken();
+        connection.revokeToken();
+    }
+
+    public void getUsers(final Consumer<BoxUser> consumer) {
+        getUsers(null, consumer);
+    }
+
+    public void getUsers(final String filterTerm, final Consumer<BoxUser> consumer) {
+        connection.asSelf();
+        BoxUser.getAllEnterpriseUsers(connection, filterTerm).forEach(info -> consumer.accept(info.getResource()));
+    }
+
+    public BoxFolder getRootFolder() {
+        return getRootFolder(null);
+    }
+
+    public BoxFolder getRootFolder(final String userId) {
+        if (StringUtil.isNotBlank(userId)) {
+            connection.asUser(userId);
+        } else {
+            connection.asSelf();
+        }
+        return BoxFolder.getRootFolder(connection);
+    }
+
+    public BoxFolder getFolder(final String folderId) {
+        return getFolder(folderId, null);
+    }
+
+    public BoxFolder getFolder(final String folderId, final String userId) {
+        if (StringUtil.isNotBlank(userId)) {
+            connection.asUser(userId);
+        } else {
+            connection.asSelf();
+        }
+        return new BoxFolder(connection, folderId);
+    }
+
+    public void getFiles(final BoxFolder folder, final Consumer<BoxFile> consumer) {
+        getFiles(folder, null, consumer);
+    }
+
+    public void getFiles(final BoxFolder folder, final String userId, final Consumer<BoxFile> consumer) {
+        if (StringUtil.isNotBlank(userId)) {
+            connection.asUser(userId);
+        } else {
+            connection.asSelf();
+        }
+        // TODO use getChildrenRange()
+        folder.getChildren().forEach(info -> {
+            switch (info.getType()) {
+            case "file":
+                consumer.accept(new BoxFile(connection, info.getID()));
+                break;
+            case "folder":
+                getFiles(getFolder(info.getID()), userId, consumer);
+                break;
+            }
+        });
+    }
+
+    public InputStream getFileInputStream(final BoxFile file) {
+        try (final DeferredFileOutputStream dfos = new DeferredFileOutputStream(maxCachedContentSize, "crawler-BoxClient-", ".out",
+                SystemUtils.getJavaIoTmpDir())) {
+            file.download(dfos);
+            dfos.flush();
+            if (dfos.isInMemory()) {
+                return new ByteArrayInputStream(dfos.getData());
+            } else {
+                return new TemporaryFileInputStream(dfos.getFile());
+            }
+        } catch (final Exception e) {
+            throw new CrawlingAccessException("Failed to create an input stream from " + file.getID(), e);
         }
     }
 
