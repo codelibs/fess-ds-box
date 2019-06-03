@@ -370,8 +370,8 @@ public class BoxDataStore extends AbstractDataStore {
 
         @Override
         public String toString() {
-            return "{maxSize=" + maxSize + "ignoreError=" + ignoreError + "ignoreFolder=" + ignoreFolder + "supportedMimeTypes=" + Arrays
-                    .toString(supportedMimeTypes) + "urlFilter=" + urlFilter + "}";
+            return "{fields=" + Arrays.toString(fields) + ",maxSize=" + maxSize + ",ignoreError=" + ignoreError + ",ignoreFolder="
+                    + ignoreFolder + ",supportedMimeTypes=" + Arrays.toString(supportedMimeTypes) + ",urlFilter=" + urlFilter + "}";
         }
     }
 
