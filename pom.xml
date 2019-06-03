@@ -124,6 +124,8 @@
 							<artifactSet>
 								<includes>
 									<include>com.box:box-java-sdk</include>
+									<include>com.eclipsesource.minimal-json:minimal-json</include>
+									<include>org.bitbucket.b_c:jose4j</include>
 								</includes>
 							</artifactSet>
 						</configuration>
