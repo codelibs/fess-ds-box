@@ -143,50 +143,41 @@ public class BoxClient implements AutoCloseable {
         return new BoxFolder(connection, folderId);
     }
 
-    public void getFiles(final BoxFolder folder, final Consumer<BoxFile> consumer) {
-        getFiles(folder, null, consumer);
+    public void getFiles(final BoxFolder folder, final String[] fields, final Consumer<BoxFile> consumer) {
+        getFiles(folder, null, fields, consumer);
     }
 
-    public void getFiles(final BoxFolder folder, final String userId, final Consumer<BoxFile> consumer) {
+    public void getFiles(final BoxFolder folder, final String userId, final String[] fields, final Consumer<BoxFile> consumer) {
         if (StringUtil.isNotBlank(userId)) {
             connection.asUser(userId);
         } else {
             connection.asSelf();
         }
         // TODO use getChildrenRange()
-        folder.getChildren().forEach(info -> {
-            switch (info.getType()) {
-            case ITEM_TYPE_FILE:
-                consumer.accept(new BoxFile(connection, info.getID()));
-                break;
-            case ITEM_TYPE_FOLDER:
-                getFiles(getFolder(info.getID()), userId, consumer);
-                break;
-            }
-        });
-    }
-
-    public void getItems(final BoxFolder folder, final Consumer<BoxItem> consumer) {
-        getItems(folder, null, consumer);
-    }
-
-    public void getItems(final BoxFolder folder, final String userId, final Consumer<BoxItem> consumer) {
-        if (StringUtil.isNotBlank(userId)) {
-            connection.asUser(userId);
+        final Iterable<BoxItem.Info> children;
+        if (fields != null) {
+            children = folder.getChildren(fields);
+        } else {
+            children = folder.getChildren();
         }
-        // TODO use getChildrenRange()
-        folder.getChildren().forEach(info -> {
+        children.forEach(info -> {
             switch (info.getType()) {
             case ITEM_TYPE_FILE:
                 consumer.accept(new BoxFile(connection, info.getID()));
                 break;
             case ITEM_TYPE_FOLDER:
-                final BoxFolder childFolder = getFolder(info.getID(), userId);
-                consumer.accept(childFolder);
-                getItems(childFolder, userId, consumer);
+                getFiles(getFolder(info.getID()), userId, fields, consumer);
                 break;
             }
         });
+    }
+
+    public void getFiles(final BoxFolder folder, final Consumer<BoxFile> consumer) {
+        getFiles(folder, null, null, consumer);
+    }
+
+    public void getFiles(final BoxFolder folder, final String userId, final Consumer<BoxFile> consumer) {
+        getFiles(folder, userId, null, consumer);
     }
 
     public InputStream getFileInputStream(final BoxFile file) {

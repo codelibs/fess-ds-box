@@ -53,6 +53,7 @@ public class BoxDataStore extends AbstractDataStore {
     protected static final long DEFAULT_MAX_SIZE = 10000000L; // 10m
 
     // parameters
+    protected static final String FIELDS = "fields";
     protected static final String MAX_SIZE = "max_size";
     protected static final String IGNORE_FOLDER = "ignore_folder";
     protected static final String IGNORE_ERROR = "ignore_error";
@@ -141,7 +142,7 @@ public class BoxDataStore extends AbstractDataStore {
         }
         client.getUsers(user -> {
             final BoxFolder folder = client.getRootFolder(user.getID());
-            client.getFiles(folder, user.getID(), file -> executorService
+            client.getFiles(folder, user.getID(), config.fields, file -> executorService
                     .execute(() -> storeFile(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, client, file)));
         });
     }
@@ -302,18 +303,28 @@ public class BoxDataStore extends AbstractDataStore {
     }
 
     protected static class Config {
+        final String[] fields;
         final long maxSize;
         final boolean ignoreFolder, ignoreError;
         final String[] supportedMimeTypes;
         final UrlFilter urlFilter;
 
         Config(final Map<String, String> paramMap) {
+            fields = getFields(paramMap);
             maxSize = getMaxSize(paramMap);
             ignoreFolder = isIgnoreFolder(paramMap);
             ignoreError = isIgnoreError(paramMap);
             supportedMimeTypes = getSupportedMimeTypes(paramMap);
             urlFilter = getUrlFilter(paramMap);
             // urlFilter = null;
+        }
+
+        private String[] getFields(final Map<String, String> paramMap) {
+            final String value = paramMap.get(FIELDS);
+            if (value != null) {
+                return StreamUtil.split(value, ",").get(stream -> stream.map(String::trim).toArray(String[]::new));
+            }
+            return null;
         }
 
         private long getMaxSize(final Map<String, String> paramMap) {
