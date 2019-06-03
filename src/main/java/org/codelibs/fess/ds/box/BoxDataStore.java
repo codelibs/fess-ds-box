@@ -63,11 +63,45 @@ public class BoxDataStore extends AbstractDataStore {
 
     // scripts
     protected static final String FILE = "file";
-    protected static final String FILE_NAME = "name";
-    protected static final String FILE_DESCRIPTION = "description";
+    // original
+    protected static final String FILE_URL = "url";
     protected static final String FILE_CONTENTS = "contents";
     protected static final String FILE_MIMETYPE = "mimetype";
     protected static final String FILE_FILETYPE = "filetype";
+    // default
+    protected static final String FILE_TYPE = "type";
+    protected static final String FILE_ID = "id";
+    protected static final String FILE_SEQUENCE_ID = "sequence_id";
+    protected static final String FILE_ETAG = "etag";
+    protected static final String FILE_SHA1 = "sha1";
+    protected static final String FILE_NAME = "name";
+    protected static final String FILE_DESCRIPTION = "description";
+    protected static final String FILE_SIZE = "size";
+    protected static final String FILE_PATH_COLLECTION = "path_collection";
+    protected static final String FILE_CREATED_AT = "created_at";
+    protected static final String FILE_MODIFIED_AT = "modified_at";
+    protected static final String FILE_TRASHED_AT = "trashed_at";
+    protected static final String FILE_PURGED_AT = "purged_at";
+    protected static final String FILE_CONTENT_CREATED_AT = "content_created_at";
+    protected static final String FILE_CONTENT_MODIFIED_AT = "content_modified_at";
+    protected static final String FILE_CREATED_BY = "created_by";
+    protected static final String FILE_MODIFIED_BY = "modified_by";
+    protected static final String FILE_OWNED_BY = "owned_by";
+    protected static final String FILE_SHARED_LINK = "shared_link";
+    protected static final String FILE_PARENT = "parent";
+    protected static final String FILE_ITEM_STATUS = "item_status";
+    protected static final String FILE_VERSION_NUMBER = "version_number";
+    protected static final String FILE_COMMENT_COUNT = "comment_count";
+    protected static final String FILE_PERMISSIONS = "permissions";
+    protected static final String FILE_TAGS = "tags";
+    protected static final String FILE_LOCK = "lock";
+    protected static final String FILE_EXTENSION = "extension";
+    protected static final String FILE_IS_PACKAGE = "is_package";
+    protected static final String FILE_FILE_VERSION = "file_version";
+    protected static final String FILE_COLLECTIONS = "collections";
+    protected static final String FILE_WATERMARK_INFO = "watermark_info";
+    protected static final String FILE_METADATA = "metadata";
+    protected static final String FILE_REPRESENTATIONS = "representations";
 
     protected String extractorName = "tikaExtractor";
 
@@ -145,11 +179,46 @@ public class BoxDataStore extends AbstractDataStore {
             }
 
             final String fileType = ComponentUtil.getFileTypeHelper().get(mimeType);
-            fileMap.put(FILE_NAME, info.getName());
-            fileMap.put(FILE_DESCRIPTION, info.getDescription() != null ? info.getDescription() : "");
+
+            // TODO adjust format
+            fileMap.put(FILE_URL, url);
             fileMap.put(FILE_CONTENTS, getFileContents(client, file, mimeType, config.ignoreError));
             fileMap.put(FILE_MIMETYPE, mimeType);
             fileMap.put(FILE_FILETYPE, fileType);
+            fileMap.put(FILE_TYPE, info.getType());
+            fileMap.put(FILE_ID, info.getID());
+            fileMap.put(FILE_SEQUENCE_ID, info.getSequenceID());
+            fileMap.put(FILE_ETAG, info.getEtag());
+            fileMap.put(FILE_SHA1, info.getSha1());
+            fileMap.put(FILE_NAME, info.getName());
+            fileMap.put(FILE_DESCRIPTION, info.getDescription());
+            fileMap.put(FILE_SIZE, info.getSize());
+            fileMap.put(FILE_PATH_COLLECTION, info.getPathCollection()); //
+            fileMap.put(FILE_CREATED_AT, info.getCreatedAt());
+            fileMap.put(FILE_MODIFIED_AT, info.getModifiedAt());
+            fileMap.put(FILE_TRASHED_AT, info.getTrashedAt());
+            fileMap.put(FILE_PURGED_AT, info.getPurgedAt());
+            fileMap.put(FILE_CONTENT_CREATED_AT, info.getContentCreatedAt());
+            fileMap.put(FILE_CONTENT_MODIFIED_AT, info.getContentModifiedAt());
+            fileMap.put(FILE_CREATED_BY, info.getCreatedBy()); //
+            fileMap.put(FILE_MODIFIED_BY, info.getModifiedBy()); //
+            fileMap.put(FILE_OWNED_BY, info.getOwnedBy()); //
+            fileMap.put(FILE_SHARED_LINK, info.getSharedLink()); //
+            fileMap.put(FILE_PARENT, info.getParent()); //
+            fileMap.put(FILE_ITEM_STATUS, info.getItemStatus());
+            fileMap.put(FILE_VERSION_NUMBER, info.getVersionNumber());
+            fileMap.put(FILE_COMMENT_COUNT, info.getCommentCount());
+            fileMap.put(FILE_PERMISSIONS, info.getPermissions()); //
+            fileMap.put(FILE_TAGS, info.getTags()); //
+            fileMap.put(FILE_LOCK, info.getLock()); //
+            fileMap.put(FILE_EXTENSION, info.getExtension());
+            fileMap.put(FILE_IS_PACKAGE, info.getIsPackage());
+            fileMap.put(FILE_FILE_VERSION, info.getVersion()); //
+            fileMap.put(FILE_COLLECTIONS, info.getCollections()); //
+            // fileMap.put(FILE_WATERMARK_INFO, file.getWatermark()); //
+            // fileMap.put(FILE_METADATA, file.getMetadata()); //
+            fileMap.put(FILE_REPRESENTATIONS, info.getRepresentations()); //
+
             resultMap.put(FILE, fileMap);
             if (logger.isDebugEnabled()) {
                 logger.debug("fileMap: {}", fileMap);
