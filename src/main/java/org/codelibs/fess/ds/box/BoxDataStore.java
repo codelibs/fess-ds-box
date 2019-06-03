@@ -100,6 +100,7 @@ public class BoxDataStore extends AbstractDataStore {
     protected static final String FILE_EXTENSION = "extension";
     protected static final String FILE_IS_PACKAGE = "is_package";
     // other
+    protected static final String FILE_DOWNLOAD_URL = "download_url";
     protected static final String FILE_IS_WATERMARK = "is_watermark";
     protected static final String FILE_METADATA = "metadata";
     protected static final String FILE_COLLECTIONS = "collections";
@@ -217,6 +218,7 @@ public class BoxDataStore extends AbstractDataStore {
             fileMap.put(FILE_EXTENSION, info.getExtension());
             fileMap.put(FILE_IS_PACKAGE, info.getIsPackage());
 
+            fileMap.put(FILE_DOWNLOAD_URL, file.getDownloadURL());
             /*
             fileMap.put(FILE_IS_WATERMARK, info.getIsWatermarked());
             fileMap.put(FILE_METADATA, file.getMetadata()); //
