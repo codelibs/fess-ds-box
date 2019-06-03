@@ -71,6 +71,7 @@ public class BoxDataStore extends AbstractDataStore {
     // default
     protected static final String FILE_TYPE = "type";
     protected static final String FILE_ID = "id";
+    protected static final String FILE_FILE_VERSION = "file_version";
     protected static final String FILE_SEQUENCE_ID = "sequence_id";
     protected static final String FILE_ETAG = "etag";
     protected static final String FILE_SHA1 = "sha1";
@@ -97,10 +98,10 @@ public class BoxDataStore extends AbstractDataStore {
     protected static final String FILE_LOCK = "lock";
     protected static final String FILE_EXTENSION = "extension";
     protected static final String FILE_IS_PACKAGE = "is_package";
-    protected static final String FILE_FILE_VERSION = "file_version";
-    protected static final String FILE_COLLECTIONS = "collections";
-    protected static final String FILE_WATERMARK_INFO = "watermark_info";
+    // other
+    protected static final String FILE_IS_WATERMARK = "is_watermark";
     protected static final String FILE_METADATA = "metadata";
+    protected static final String FILE_COLLECTIONS = "collections";
     protected static final String FILE_REPRESENTATIONS = "representations";
 
     protected String extractorName = "tikaExtractor";
@@ -180,13 +181,14 @@ public class BoxDataStore extends AbstractDataStore {
 
             final String fileType = ComponentUtil.getFileTypeHelper().get(mimeType);
 
-            // TODO adjust format
             fileMap.put(FILE_URL, url);
             fileMap.put(FILE_CONTENTS, getFileContents(client, file, mimeType, config.ignoreError));
             fileMap.put(FILE_MIMETYPE, mimeType);
             fileMap.put(FILE_FILETYPE, fileType);
+
             fileMap.put(FILE_TYPE, info.getType());
             fileMap.put(FILE_ID, info.getID());
+            fileMap.put(FILE_FILE_VERSION, info.getVersion()); //
             fileMap.put(FILE_SEQUENCE_ID, info.getSequenceID());
             fileMap.put(FILE_ETAG, info.getEtag());
             fileMap.put(FILE_SHA1, info.getSha1());
@@ -213,11 +215,13 @@ public class BoxDataStore extends AbstractDataStore {
             fileMap.put(FILE_LOCK, info.getLock()); //
             fileMap.put(FILE_EXTENSION, info.getExtension());
             fileMap.put(FILE_IS_PACKAGE, info.getIsPackage());
-            fileMap.put(FILE_FILE_VERSION, info.getVersion()); //
+
+            /*
+            fileMap.put(FILE_IS_WATERMARK, info.getIsWatermarked());
+            fileMap.put(FILE_METADATA, file.getMetadata()); //
             fileMap.put(FILE_COLLECTIONS, info.getCollections()); //
-            // fileMap.put(FILE_WATERMARK_INFO, file.getWatermark()); //
-            // fileMap.put(FILE_METADATA, file.getMetadata()); //
             fileMap.put(FILE_REPRESENTATIONS, info.getRepresentations()); //
+            */
 
             resultMap.put(FILE, fileMap);
             if (logger.isDebugEnabled()) {
@@ -264,7 +268,7 @@ public class BoxDataStore extends AbstractDataStore {
     }
 
     protected String getFileContents(final BoxClient client, final BoxFile file, final String mimeType, final boolean ignoreError) {
-        // TODO divide by mimeType
+        // TODO .boxnote
         final BoxFile.Info info = file.getInfo();
         try (final InputStream in = client.getFileInputStream(file)) {
             Extractor extractor = ComponentUtil.getExtractorFactory().getExtractor(mimeType);
