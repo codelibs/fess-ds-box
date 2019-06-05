@@ -18,6 +18,9 @@ package org.codelibs.fess.ds.box;
 import com.box.sdk.BoxFile;
 import com.box.sdk.BoxFolder;
 import com.box.sdk.BoxItem;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.codelibs.core.io.ResourceUtil;
 import org.codelibs.core.lang.StringUtil;
 import org.codelibs.core.stream.StreamUtil;
 import org.codelibs.curl.Curl;
@@ -36,6 +39,7 @@ import org.codelibs.fess.util.ComponentUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.io.InputStream;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -271,9 +275,11 @@ public class BoxDataStore extends AbstractDataStore {
     }
 
     protected String getFileContents(final BoxClient client, final BoxFile file, final String mimeType, final boolean ignoreError) {
-        // TODO .boxnote
         final BoxFile.Info info = file.getInfo();
         try (final InputStream in = client.getFileInputStream(file)) {
+            if ("boxnote".equals(ResourceUtil.getExtension(info.getName()))) {
+                return getBoxNoteContents(in, info, ignoreError);
+            }
             Extractor extractor = ComponentUtil.getExtractorFactory().getExtractor(mimeType);
             if (extractor == null) {
                 if (logger.isDebugEnabled()) {
@@ -289,6 +295,17 @@ public class BoxDataStore extends AbstractDataStore {
             } else {
                 throw new DataStoreCrawlingException(file.getPreviewLink().toString(), "Failed to get contents: " + info.getName(), e);
             }
+        }
+    }
+
+    protected String getBoxNoteContents(final InputStream in, final BoxFile.Info info, final boolean ignoreError) {
+        final ObjectMapper mapper = new ObjectMapper();
+        try {
+            final JsonNode node = mapper.readTree(in);
+            return node.get("atext").get("text").asText();
+        } catch (IOException e) {
+            logger.warn("Failed to get BoxNote contents: " + info.getName(), e);
+            return StringUtil.EMPTY;
         }
     }
 
