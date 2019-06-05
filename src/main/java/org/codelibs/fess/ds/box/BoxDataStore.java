@@ -73,6 +73,7 @@ public class BoxDataStore extends AbstractDataStore {
     protected static final String FILE_CONTENTS = "contents";
     protected static final String FILE_MIMETYPE = "mimetype";
     protected static final String FILE_FILETYPE = "filetype";
+    protected static final String FILE_DOWNLOAD_URL = "download_url";
     // default
     protected static final String FILE_TYPE = "type";
     protected static final String FILE_ID = "id";
@@ -104,7 +105,6 @@ public class BoxDataStore extends AbstractDataStore {
     protected static final String FILE_EXTENSION = "extension";
     protected static final String FILE_IS_PACKAGE = "is_package";
     // other
-    protected static final String FILE_DOWNLOAD_URL = "download_url";
     protected static final String FILE_IS_WATERMARK = "is_watermark";
     protected static final String FILE_METADATA = "metadata";
     protected static final String FILE_COLLECTIONS = "collections";
@@ -191,6 +191,7 @@ public class BoxDataStore extends AbstractDataStore {
             fileMap.put(FILE_CONTENTS, getFileContents(client, file, mimeType, config.ignoreError));
             fileMap.put(FILE_MIMETYPE, mimeType);
             fileMap.put(FILE_FILETYPE, fileType);
+            fileMap.put(FILE_DOWNLOAD_URL, file.getDownloadURL());
 
             fileMap.put(FILE_TYPE, info.getType());
             fileMap.put(FILE_ID, info.getID());
@@ -222,13 +223,10 @@ public class BoxDataStore extends AbstractDataStore {
             fileMap.put(FILE_EXTENSION, info.getExtension());
             fileMap.put(FILE_IS_PACKAGE, info.getIsPackage());
 
-            fileMap.put(FILE_DOWNLOAD_URL, file.getDownloadURL());
-            /*
             fileMap.put(FILE_IS_WATERMARK, info.getIsWatermarked());
-            fileMap.put(FILE_METADATA, file.getMetadata()); //
+            // fileMap.put(FILE_METADATA, file.getMetadata()); //
             fileMap.put(FILE_COLLECTIONS, info.getCollections()); //
             fileMap.put(FILE_REPRESENTATIONS, info.getRepresentations()); //
-            */
 
             resultMap.put(FILE, fileMap);
             if (logger.isDebugEnabled()) {
