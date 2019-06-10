@@ -49,6 +49,7 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class BoxDataStore extends AbstractDataStore {
@@ -167,15 +168,16 @@ public class BoxDataStore extends AbstractDataStore {
                 return;
             }
 
-            final String url = getUrl(client, info);
+            final String path = getPath(info);
             final UrlFilter urlFilter = config.urlFilter;
-            if (urlFilter != null && !urlFilter.match(url)) {
+            if (urlFilter != null && !urlFilter.match(path)) {
                 if (logger.isDebugEnabled()) {
-                    logger.debug("Not matched: {}", url);
+                    logger.debug("Not matched: {}", path);
                 }
                 return;
             }
 
+            final String url = getUrl(client, info);
             logger.info("Crawling URL: {}", url);
 
             final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap);
@@ -305,6 +307,10 @@ public class BoxDataStore extends AbstractDataStore {
 
     protected String getFileMimeType(final BoxFile file) {
         return Curl.head(file.getDownloadURL().toString()).execute().getHeaderValue("content-type");
+    }
+
+    protected String getPath(final BoxItem.Info info) {
+        return info.getPathCollection().stream().map(BoxItem.Info::getName).collect(Collectors.joining("/"));
     }
 
     protected String getUrl(final BoxClient client, final BoxItem.Info info) {
