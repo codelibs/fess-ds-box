@@ -36,6 +36,7 @@ import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.es.config.exentity.DataConfig;
 import org.codelibs.fess.exception.DataStoreCrawlingException;
 import org.codelibs.fess.util.ComponentUtil;
+import org.lastaflute.di.core.exception.ComponentNotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -276,7 +277,7 @@ public class BoxDataStore extends AbstractDataStore {
         final BoxFile.Info info = file.getInfo();
         try (final InputStream in = client.getFileInputStream(file)) {
             if ("boxnote".equals(ResourceUtil.getExtension(info.getName()))) {
-                return getBoxNoteContents(in, info, ignoreError);
+                return getBoxNoteContents(in);
             }
             Extractor extractor = ComponentUtil.getExtractorFactory().getExtractor(mimeType);
             if (extractor == null) {
@@ -296,15 +297,10 @@ public class BoxDataStore extends AbstractDataStore {
         }
     }
 
-    protected String getBoxNoteContents(final InputStream in, final BoxFile.Info info, final boolean ignoreError) {
+    protected String getBoxNoteContents(final InputStream in) throws IOException {
         final ObjectMapper mapper = new ObjectMapper();
-        try {
-            final JsonNode node = mapper.readTree(in);
-            return node.get("atext").get("text").asText();
-        } catch (IOException e) {
-            logger.warn("Failed to get BoxNote contents: " + info.getName(), e);
-            return StringUtil.EMPTY;
-        }
+        final JsonNode node = mapper.readTree(in);
+        return node.get("atext").get("text").asText();
     }
 
     protected String getFileMimeType(final BoxFile file) {
@@ -333,7 +329,6 @@ public class BoxDataStore extends AbstractDataStore {
             ignoreError = isIgnoreError(paramMap);
             supportedMimeTypes = getSupportedMimeTypes(paramMap);
             urlFilter = getUrlFilter(paramMap);
-            // urlFilter = null;
         }
 
         private String[] getFields(final Map<String, String> paramMap) {
@@ -367,7 +362,12 @@ public class BoxDataStore extends AbstractDataStore {
         }
 
         private UrlFilter getUrlFilter(final Map<String, String> paramMap) {
-            final UrlFilter urlFilter = ComponentUtil.getComponent(UrlFilter.class);
+            final UrlFilter urlFilter;
+            try {
+                urlFilter = ComponentUtil.getComponent(UrlFilter.class);
+            } catch (final ComponentNotFoundException e) {
+                return null;
+            }
             final String include = paramMap.get(INCLUDE_PATTERN);
             if (StringUtil.isNotBlank(include)) {
                 urlFilter.addInclude(include);
