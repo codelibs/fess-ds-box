@@ -21,3 +21,4 @@
 .DS_Store
 /plugins/
 /tomcat.8080/
+/src/test/resources/config.json
