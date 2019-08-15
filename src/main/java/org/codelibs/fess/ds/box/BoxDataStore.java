@@ -116,7 +116,7 @@ public class BoxDataStore extends AbstractDataStore {
 
     @Override
     protected String getName() {
-        return "Box";
+        return this.getClass().getSimpleName();
     }
 
     @Override
