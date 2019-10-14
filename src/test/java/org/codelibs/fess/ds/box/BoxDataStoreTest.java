@@ -99,13 +99,13 @@ public class BoxDataStoreTest extends LastaFluteTestCase {
         try {
             final JsonNode root = mapper.readTree(file);
             final JsonNode boxAppSettings = root.get("boxAppSettings");
-            config.put(BoxClient.CLIENT_ID_PARAM, boxAppSettings.get("clientID").asText());
-            config.put(BoxClient.CLIENT_SECRET_PARAM, boxAppSettings.get("clientSecret").asText());
+            config.put(BoxClientConnection.CLIENT_ID_PARAM, boxAppSettings.get("clientID").asText());
+            config.put(BoxClientConnection.CLIENT_SECRET_PARAM, boxAppSettings.get("clientSecret").asText());
             final JsonNode appAuth = boxAppSettings.get("appAuth");
-            config.put(BoxClient.PUBLIC_KEY_ID_PARAM, appAuth.get("publicKeyID").asText());
-            config.put(BoxClient.PRIVATE_KEY_PARAM, appAuth.get("privateKey").asText());
-            config.put(BoxClient.PASSPHRASE_PARAM, appAuth.get("passphrase").asText());
-            config.put(BoxClient.ENTERPRISE_ID_PARAM, root.get("enterpriseID").asText());
+            config.put(BoxClientConnection.PUBLIC_KEY_ID_PARAM, appAuth.get("publicKeyID").asText());
+            config.put(BoxClientConnection.PRIVATE_KEY_PARAM, appAuth.get("privateKey").asText());
+            config.put(BoxClientConnection.PASSPHRASE_PARAM, appAuth.get("passphrase").asText());
+            config.put(BoxClientConnection.ENTERPRISE_ID_PARAM, root.get("enterpriseID").asText());
         } catch (final IOException e) {
             return null;
         }

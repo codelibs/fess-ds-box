@@ -129,7 +129,7 @@ public class BoxDataStore extends AbstractDataStore {
         final ExecutorService executorService =
                 Executors.newFixedThreadPool(Integer.parseInt(paramMap.getOrDefault(NUMBER_OF_THREADS, "1")));
 
-        try (final BoxClient client = createClient(paramMap)) {
+        try (final BoxClientConnection client = createClient(paramMap)) {
             crawlUserFolders(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, executorService, client);
             executorService.awaitTermination(60, TimeUnit.SECONDS);
         } catch (final InterruptedException e) {
@@ -143,7 +143,7 @@ public class BoxDataStore extends AbstractDataStore {
 
     protected void crawlUserFolders(final DataConfig dataConfig, final IndexUpdateCallback callback, final Config config,
             final Map<String, String> paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
-            final ExecutorService executorService, final BoxClient client) {
+            final ExecutorService executorService, final BoxClientConnection client) {
         if (logger.isDebugEnabled()) {
             logger.debug("crawling user folders.");
         }
@@ -156,7 +156,7 @@ public class BoxDataStore extends AbstractDataStore {
 
     protected void storeFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final Config config,
             final Map<String, String> paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
-            final BoxClient client, final BoxFile file) {
+            final BoxClientConnection client, final BoxFile file) {
         final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
         try {
             final BoxFile.Info info = file.getInfo();
@@ -275,7 +275,7 @@ public class BoxDataStore extends AbstractDataStore {
         }
     }
 
-    protected String getFileContents(final BoxClient client, final BoxFile file, final String mimeType, final boolean ignoreError) {
+    protected String getFileContents(final BoxClientConnection client, final BoxFile file, final String mimeType, final boolean ignoreError) {
         final BoxFile.Info info = file.getInfo();
         try (final InputStream in = client.getFileInputStream(file)) {
             if ("boxnote".equals(ResourceUtil.getExtension(info.getName()))) {
@@ -313,12 +313,12 @@ public class BoxDataStore extends AbstractDataStore {
         return info.getPathCollection().stream().map(BoxItem.Info::getName).collect(Collectors.joining("/"));
     }
 
-    protected String getUrl(final BoxClient client, final BoxItem.Info info) {
+    protected String getUrl(final BoxClientConnection client, final BoxItem.Info info) {
         return client.getBaseUrl() + "/" + info.getType() + "/" + info.getID();
     }
 
-    protected BoxClient createClient(final Map<String, String> paramMap) {
-        return new BoxClient(paramMap);
+    protected BoxClientConnection createClient(final Map<String, String> paramMap) {
+        return new BoxClientConnection(paramMap);
     }
 
     protected static class Config {

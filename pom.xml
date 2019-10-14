@@ -56,7 +56,7 @@
 		<tika.version>1.22</tika.version>
 
 		<!-- Crawler -->
-		<crawler.version>3.4.0</crawler.version>
+		<crawler.version>3.4.1-SNAPSHOT</crawler.version>
 
 		<!-- Suggest -->
 		<suggest.version>7.4.0</suggest.version>
@@ -228,6 +228,12 @@
 			<groupId>org.codelibs.fess</groupId>
 			<artifactId>fess</artifactId>
 			<version>${fess.version}</version>
+			<scope>provided</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.codelibs.fess</groupId>
+			<artifactId>fess-crawler</artifactId>
+			<version>${crawler.version}</version>
 			<scope>provided</scope>
 		</dependency>
 		<dependency>
