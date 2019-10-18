@@ -15,6 +15,8 @@
  */
 package org.codelibs.fess.ds.box;
 
+import com.box.sdk.BoxAPIException;
+import com.box.sdk.BoxAPIResponseException;
 import com.box.sdk.BoxFile;
 import com.box.sdk.BoxFolder;
 import com.box.sdk.BoxItem;
@@ -276,26 +278,31 @@ public class BoxDataStore extends AbstractDataStore {
     }
 
     protected String getFileContents(final BoxClient client, final BoxFile file, final String mimeType, final boolean ignoreError) {
-        final BoxFile.Info info = file.getInfo();
-        try (final InputStream in = client.getFileInputStream(file)) {
-            if ("boxnote".equals(ResourceUtil.getExtension(info.getName()))) {
-                return getBoxNoteContents(in);
-            }
-            Extractor extractor = ComponentUtil.getExtractorFactory().getExtractor(mimeType);
-            if (extractor == null) {
-                if (logger.isDebugEnabled()) {
-                    logger.debug("use a default extractor as {} by {}", extractorName, mimeType);
+        try {
+            final BoxFile.Info info = file.getInfo();
+            try (final InputStream in = client.getFileInputStream(file)) {
+                if ("boxnote".equals(ResourceUtil.getExtension(info.getName()))) {
+                    return getBoxNoteContents(in);
                 }
-                extractor = ComponentUtil.getComponent(extractorName);
+                Extractor extractor = ComponentUtil.getExtractorFactory().getExtractor(mimeType);
+                if (extractor == null) {
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("use a default extractor as {} by {}", extractorName, mimeType);
+                    }
+                    extractor = ComponentUtil.getComponent(extractorName);
+                }
+                return extractor.getText(in, null).getContent();
+            } catch (final Exception e) {
+                if (ignoreError) {
+                    logger.warn("Failed to get contents: " + info.getName(), e);
+                    return StringUtil.EMPTY;
+                } else {
+                    throw new DataStoreCrawlingException(file.getPreviewLink().toString(), "Failed to get contents: " + info.getName(), e);
+                }
             }
-            return extractor.getText(in, null).getContent();
-        } catch (final Exception e) {
-            if (ignoreError) {
-                logger.warn("Failed to get contents: " + info.getName(), e);
-                return StringUtil.EMPTY;
-            } else {
-                throw new DataStoreCrawlingException(file.getPreviewLink().toString(), "Failed to get contents: " + info.getName(), e);
-            }
+        } catch (final BoxAPIException e) {
+            logger.warn("[Box API Error] Failed to get file content. : responseCode = {}, response = {}" , e.getResponseCode(), e.getResponse());
+            return StringUtil.EMPTY;
         }
     }
 

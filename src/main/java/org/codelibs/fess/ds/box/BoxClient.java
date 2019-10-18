@@ -19,6 +19,9 @@ import com.box.sdk.*;
 import org.apache.commons.io.output.DeferredFileOutputStream;
 import org.apache.commons.lang3.SystemUtils;
 import org.codelibs.core.lang.StringUtil;
+import org.codelibs.core.timer.TimeoutManager;
+import org.codelibs.core.timer.TimeoutTarget;
+import org.codelibs.core.timer.TimeoutTask;
 import org.codelibs.fess.crawler.exception.CrawlingAccessException;
 import org.codelibs.fess.crawler.util.TemporaryFileInputStream;
 import org.codelibs.fess.exception.DataStoreException;
@@ -36,6 +39,8 @@ public class BoxClient implements AutoCloseable {
 
     private static final Logger logger = LoggerFactory.getLogger(BoxClient.class);
 
+    protected static String DEFAULT_REFRESH_TOKEN_INTERVAL = "3540"; // TODO
+
     protected static final String BASE_URL = "base_url";
     protected static final String CLIENT_ID_PARAM = "client_id";
     protected static final String CLIENT_SECRET_PARAM = "client_secret";
@@ -47,61 +52,36 @@ public class BoxClient implements AutoCloseable {
     protected static final String PROXY_HOST = "proxy_host";
     protected static final String PROXY_PORT = "proxy_port";
     protected static final String MAX_CACHED_CONTENT_SIZE = "max_cached_content_size";
+    protected static final String REFRESH_TOKEN_INTERVAL_PARAM = "refresh_token_interval";
 
     protected static final String ITEM_TYPE_FILE = "file";
     protected static final String ITEM_TYPE_FOLDER = "folder";
 
     protected final Map<String, String> params;
-    protected final BoxAPIConnection connection;
 
     protected int maxCachedContentSize = 1024 * 1024;
 
+    protected final TimeoutTask refreshTokenTask;
+    protected final ConnectionProvider connectionProvider;
     protected final String baseUrl;
 
     public BoxClient(final Map<String, String> params) {
         this.params = params;
         this.baseUrl = params.getOrDefault(BASE_URL, "https://app.box.com");
-        this.connection = newConnection();
+        this.connectionProvider = new ConnectionProvider(params);
+        refreshTokenTask = TimeoutManager.getInstance().addTimeoutTarget(connectionProvider,
+                Integer.parseInt(params.getOrDefault(REFRESH_TOKEN_INTERVAL_PARAM, DEFAULT_REFRESH_TOKEN_INTERVAL)), true);
+
         final String size = params.get(MAX_CACHED_CONTENT_SIZE);
         if (StringUtil.isNotBlank(size)) {
             maxCachedContentSize = Integer.parseInt(size);
         }
     }
 
-    protected BoxAPIConnection newConnection() {
-        final String clientId = params.getOrDefault(CLIENT_ID_PARAM, StringUtil.EMPTY);
-        final String clientSecret = params.getOrDefault(CLIENT_SECRET_PARAM, StringUtil.EMPTY);
-        final String publicKeyId = params.getOrDefault(PUBLIC_KEY_ID_PARAM, StringUtil.EMPTY);
-        final String privateKey = params.getOrDefault(PRIVATE_KEY_PARAM, StringUtil.EMPTY).replaceAll("\\\\n", "\n");
-        final String passphrase = params.getOrDefault(PASSPHRASE_PARAM, StringUtil.EMPTY);
-        final String enterpriseId = params.getOrDefault(ENTERPRISE_ID_PARAM, StringUtil.EMPTY);
-
-        if (clientId.isEmpty() || clientSecret.isEmpty() || publicKeyId.isEmpty() || privateKey.isEmpty() || passphrase.isEmpty()
-                || enterpriseId.isEmpty()) {
-            throw new DataStoreException(
-                    "Parameter '" + CLIENT_ID_PARAM + "', '" + CLIENT_SECRET_PARAM + "', '" + PUBLIC_KEY_ID_PARAM + "', '"
-                            + PRIVATE_KEY_PARAM + "', '" + PASSPHRASE_PARAM + "', '" + ENTERPRISE_ID_PARAM + "' is required.");
-        }
-
-        final JWTEncryptionPreferences jwtPreferences = new JWTEncryptionPreferences();
-        jwtPreferences.setPublicKeyID(publicKeyId);
-        jwtPreferences.setPrivateKeyPassword(passphrase);
-        jwtPreferences.setPrivateKey(privateKey);
-        jwtPreferences.setEncryptionAlgorithm(EncryptionAlgorithm.RSA_SHA_256);
-        final BoxConfig boxConfig = new BoxConfig(clientId, clientSecret, enterpriseId, jwtPreferences);
-        final BoxDeveloperEditionAPIConnection connection = BoxDeveloperEditionAPIConnection.getAppEnterpriseConnection(boxConfig);
-
-        final String proxyHost = params.get(PROXY_HOST);
-        final String proxyPort = params.get(PROXY_PORT);
-        if (StringUtil.isNotBlank(proxyHost) && StringUtil.isNotBlank(proxyPort)) {
-            connection.setProxy((new Proxy(Proxy.Type.HTTP, new InetSocketAddress(proxyHost, Integer.parseInt(proxyPort)))));
-        }
-        return connection;
-    }
 
     @Override
     public void close() {
-        connection.revokeToken();
+        connectionProvider.connection.revokeToken();
     }
 
     public String getBaseUrl() {
@@ -113,8 +93,8 @@ public class BoxClient implements AutoCloseable {
     }
 
     public void getUsers(final String filterTerm, final Consumer<BoxUser> consumer) {
-        connection.asSelf();
-        BoxUser.getAllEnterpriseUsers(connection, filterTerm).forEach(info -> consumer.accept(info.getResource()));
+        connectionProvider.connection.asSelf();
+        BoxUser.getAllEnterpriseUsers(connectionProvider.connection, filterTerm).forEach(info -> consumer.accept(info.getResource()));
     }
 
     public BoxFolder getRootFolder() {
@@ -123,11 +103,11 @@ public class BoxClient implements AutoCloseable {
 
     public BoxFolder getRootFolder(final String userId) {
         if (StringUtil.isNotBlank(userId)) {
-            connection.asUser(userId);
+            connectionProvider.connection.asUser(userId);
         } else {
-            connection.asSelf();
+            connectionProvider.connection.asSelf();
         }
-        return BoxFolder.getRootFolder(connection);
+        return BoxFolder.getRootFolder(connectionProvider.connection);
     }
 
     public BoxFolder getFolder(final String folderId) {
@@ -136,11 +116,11 @@ public class BoxClient implements AutoCloseable {
 
     public BoxFolder getFolder(final String folderId, final String userId) {
         if (StringUtil.isNotBlank(userId)) {
-            connection.asUser(userId);
+            connectionProvider.connection.asUser(userId);
         } else {
-            connection.asSelf();
+            connectionProvider.connection.asSelf();
         }
-        return new BoxFolder(connection, folderId);
+        return new BoxFolder(connectionProvider.connection, folderId);
     }
 
     public void getFiles(final BoxFolder folder, final String[] fields, final Consumer<BoxFile> consumer) {
@@ -149,9 +129,9 @@ public class BoxClient implements AutoCloseable {
 
     public void getFiles(final BoxFolder folder, final String userId, final String[] fields, final Consumer<BoxFile> consumer) {
         if (StringUtil.isNotBlank(userId)) {
-            connection.asUser(userId);
+            connectionProvider.connection.asUser(userId);
         } else {
-            connection.asSelf();
+            connectionProvider.connection.asSelf();
         }
         // TODO use getChildrenRange()
         final Iterable<BoxItem.Info> children;
@@ -163,7 +143,7 @@ public class BoxClient implements AutoCloseable {
         children.forEach(info -> {
             switch (info.getType()) {
             case ITEM_TYPE_FILE:
-                consumer.accept(new BoxFile(connection, info.getID()));
+                consumer.accept(new BoxFile(connectionProvider.connection, info.getID()));
                 break;
             case ITEM_TYPE_FOLDER:
                 getFiles(getFolder(info.getID()), userId, fields, consumer);
@@ -194,5 +174,61 @@ public class BoxClient implements AutoCloseable {
             throw new CrawlingAccessException("Failed to create an input stream from " + file.getID(), e);
         }
     }
+
+    protected static class ConnectionProvider implements TimeoutTarget {
+
+        protected static final Logger logger = LoggerFactory.getLogger(ConnectionProvider.class);
+
+        protected final BoxAPIConnection connection;
+
+        protected ConnectionProvider(final Map<String, String> params) {
+            connection = newConnection(params);
+        }
+
+        @Override
+        public void expired() {
+            if (connection != null) {
+                connection.refresh();
+            }
+        }
+
+        protected BoxAPIConnection newConnection(final Map<String, String> params) {
+
+            final String clientId = params.getOrDefault(CLIENT_ID_PARAM, StringUtil.EMPTY);
+            final String clientSecret = params.getOrDefault(CLIENT_SECRET_PARAM, StringUtil.EMPTY);
+            final String publicKeyId = params.getOrDefault(PUBLIC_KEY_ID_PARAM, StringUtil.EMPTY);
+            final String privateKey = params.getOrDefault(PRIVATE_KEY_PARAM, StringUtil.EMPTY).replaceAll("\\\\n", "\n");
+            final String passphrase = params.getOrDefault(PASSPHRASE_PARAM, StringUtil.EMPTY);
+            final String enterpriseId = params.getOrDefault(ENTERPRISE_ID_PARAM, StringUtil.EMPTY);
+
+            if (clientId.isEmpty() || clientSecret.isEmpty() || publicKeyId.isEmpty() || privateKey.isEmpty() || passphrase.isEmpty()
+                    || enterpriseId.isEmpty()) {
+                throw new DataStoreException(
+                        "Parameter '" + CLIENT_ID_PARAM + "', '" + CLIENT_SECRET_PARAM + "', '" + PUBLIC_KEY_ID_PARAM + "', '"
+                                + PRIVATE_KEY_PARAM + "', '" + PASSPHRASE_PARAM + "', '" + ENTERPRISE_ID_PARAM + "' is required.");
+            }
+
+            final JWTEncryptionPreferences jwtPreferences = new JWTEncryptionPreferences();
+            jwtPreferences.setPublicKeyID(publicKeyId);
+            jwtPreferences.setPrivateKeyPassword(passphrase);
+            jwtPreferences.setPrivateKey(privateKey);
+            jwtPreferences.setEncryptionAlgorithm(EncryptionAlgorithm.RSA_SHA_256);
+            final BoxConfig boxConfig = new BoxConfig(clientId, clientSecret, enterpriseId, jwtPreferences);
+
+            try {
+                final BoxDeveloperEditionAPIConnection connection = BoxDeveloperEditionAPIConnection.getAppEnterpriseConnection(boxConfig);
+                final String proxyHost = params.get(PROXY_HOST);
+                final String proxyPort = params.get(PROXY_PORT);
+                if (StringUtil.isNotBlank(proxyHost) && StringUtil.isNotBlank(proxyPort)) {
+                    connection.setProxy((new Proxy(Proxy.Type.HTTP, new InetSocketAddress(proxyHost, Integer.parseInt(proxyPort)))));
+                }
+
+                return connection;
+            } catch (final BoxAPIException e) {
+                throw new DataStoreException("Failed to create new connection. Box API Error : responseCode = " +  e.getResponseCode() + ", response = " + e.getResponse());
+            }
+        }
+
+    } // class ConnectionProvider
 
 }
