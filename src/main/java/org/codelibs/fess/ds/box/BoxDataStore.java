@@ -133,13 +133,14 @@ public class BoxDataStore extends AbstractDataStore {
 
         try (final BoxClient client = createClient(paramMap)) {
             crawlUserFolders(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, executorService, client);
+            executorService.shutdown();
             executorService.awaitTermination(60, TimeUnit.SECONDS);
         } catch (final InterruptedException e) {
             if (logger.isDebugEnabled()) {
                 logger.debug("Interrupted.", e);
             }
         } finally {
-            executorService.shutdown();
+            executorService.shutdownNow();
         }
     }
 
@@ -196,8 +197,11 @@ public class BoxDataStore extends AbstractDataStore {
             fileMap.put(FILE_CONTENTS, getFileContents(client, file, mimeType, config.ignoreError));
             fileMap.put(FILE_MIMETYPE, mimeType);
             fileMap.put(FILE_FILETYPE, fileType);
-            fileMap.put(FILE_DOWNLOAD_URL, file.getDownloadURL());
-
+            try {
+                fileMap.put(FILE_DOWNLOAD_URL, file.getDownloadURL());
+            } catch (final BoxAPIException e) {
+                fileMap.put(FILE_DOWNLOAD_URL, null);
+            }
             fileMap.put(FILE_TYPE, info.getType());
             fileMap.put(FILE_ID, info.getID());
             fileMap.put(FILE_FILE_VERSION, info.getVersion()); //
