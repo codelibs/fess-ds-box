@@ -15,6 +15,15 @@
  */
 package org.codelibs.fess.ds.box;
 
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.net.InetSocketAddress;
+import java.net.Proxy;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.function.Consumer;
+
 import com.box.sdk.*;
 import org.apache.commons.io.output.DeferredFileOutputStream;
 import org.apache.commons.lang3.SystemUtils;
@@ -27,13 +36,6 @@ import org.codelibs.fess.crawler.util.TemporaryFileInputStream;
 import org.codelibs.fess.exception.DataStoreException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.ByteArrayInputStream;
-import java.io.InputStream;
-import java.net.InetSocketAddress;
-import java.net.Proxy;
-import java.util.Map;
-import java.util.function.Consumer;
 
 public class BoxClient implements AutoCloseable {
 
@@ -81,7 +83,12 @@ public class BoxClient implements AutoCloseable {
 
     @Override
     public void close() {
-        connectionProvider.connection.revokeToken();
+        if (refreshTokenTask != null) {
+            refreshTokenTask.cancel();
+        }
+        if (connectionProvider != null) {
+            connectionProvider.close();
+        }
     }
 
     public String getBaseUrl() {
@@ -185,10 +192,38 @@ public class BoxClient implements AutoCloseable {
             connection = newConnection(params);
         }
 
+        public void close() {
+            if( connection != null) {
+                connection.revokeToken();
+            }
+        }
+        protected void refreshToken() {
+            if (logger.isDebugEnabled()) {
+                logger.debug("Refreshing access token.");
+            }
+            final ExecutorService executorService = Executors.newFixedThreadPool(1);
+            try {
+                executorService.submit( () -> {
+                    connection.refresh();
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("Access Token: {}", connection.getAccessToken());
+                    }
+                });
+            } catch (final Exception e) {
+                throw new DataStoreException("Failed to get an access token.", e);
+            } finally {
+                executorService.shutdown();
+            }
+        }
+
         @Override
         public void expired() {
             if (connection != null) {
-                connection.refresh();
+                try {
+                    refreshToken();
+                } catch (final Exception e) {
+                    logger.warn("Failed to refresh an access token.", e);
+                }
             }
         }
 
@@ -226,6 +261,9 @@ public class BoxClient implements AutoCloseable {
                 return connection;
             } catch (final BoxAPIException e) {
                 throw new DataStoreException("Failed to create new connection. Box API Error : responseCode = " +  e.getResponseCode() + ", response = " + e.getResponse());
+            } catch (final Exception e) {
+                throw new DataStoreException("Failed to create new connection.", e);
+
             }
         }
 
