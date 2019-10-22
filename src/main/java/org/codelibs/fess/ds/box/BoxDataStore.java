@@ -15,13 +15,19 @@
  */
 package org.codelibs.fess.ds.box;
 
-import com.box.sdk.BoxAPIException;
-import com.box.sdk.BoxAPIResponseException;
-import com.box.sdk.BoxFile;
-import com.box.sdk.BoxFolder;
-import com.box.sdk.BoxItem;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
 import org.codelibs.core.io.ResourceUtil;
 import org.codelibs.core.lang.StringUtil;
 import org.codelibs.core.stream.StreamUtil;
@@ -37,22 +43,18 @@ import org.codelibs.fess.ds.AbstractDataStore;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.es.config.exentity.DataConfig;
 import org.codelibs.fess.exception.DataStoreCrawlingException;
+import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.util.ComponentUtil;
 import org.lastaflute.di.core.exception.ComponentNotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
+import com.box.sdk.BoxFile;
+import com.box.sdk.BoxFolder;
+import com.box.sdk.BoxItem;
+import com.box.sdk.BoxUser;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 public class BoxDataStore extends AbstractDataStore {
 
@@ -69,6 +71,7 @@ public class BoxDataStore extends AbstractDataStore {
     protected static final String INCLUDE_PATTERN = "include_pattern";
     protected static final String EXCLUDE_PATTERN = "exclude_pattern";
     protected static final String NUMBER_OF_THREADS = "number_of_threads";
+    protected static final String FILTER_TERM = "filter_term";
 
     // scripts
     protected static final String FILE = "file";
@@ -126,35 +129,55 @@ public class BoxDataStore extends AbstractDataStore {
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap) {
         final Config config = new Config(paramMap);
         if (logger.isDebugEnabled()) {
-            logger.debug("config: {}", config);
+            logger.debug("box config: {}", config);
         }
-        final ExecutorService executorService =
-                Executors.newFixedThreadPool(Integer.parseInt(paramMap.getOrDefault(NUMBER_OF_THREADS, "1")));
 
         try (final BoxClient client = createClient(paramMap)) {
-            crawlUserFolders(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, executorService, client);
-            executorService.shutdown();
-            executorService.awaitTermination(60, TimeUnit.SECONDS);
-        } catch (final InterruptedException e) {
-            if (logger.isDebugEnabled()) {
-                logger.debug("Interrupted.", e);
-            }
-        } finally {
-            executorService.shutdownNow();
+            crawlUserFolders(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, client);
         }
     }
 
     protected void crawlUserFolders(final DataConfig dataConfig, final IndexUpdateCallback callback, final Config config,
             final Map<String, String> paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
-            final ExecutorService executorService, final BoxClient client) {
+            final BoxClient client) {
         if (logger.isDebugEnabled()) {
             logger.debug("crawling user folders.");
         }
-        client.getUsers(user -> {
-            final BoxFolder folder = client.getRootFolder(user.getID());
-            client.getFiles(folder, user.getID(), config.fields, file -> executorService
-                    .execute(() -> storeFile(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, client, file)));
+        final int numOfThread = Integer.parseInt(paramMap.getOrDefault(NUMBER_OF_THREADS, "1"));
+        final String filterTerm = paramMap.get(FILTER_TERM);
+        client.asSelf();
+        client.getUsers(filterTerm, info -> {
+            final BoxUser user = info.getResource();
+            final String userId = user.getID();
+            if (logger.isDebugEnabled()) {
+                logger.debug("crawling by {}", userId);
+            }
+            client.asUser(userId);
+            final BoxFolder folder = client.getRootFolder();
+            final ExecutorService executorService = newFixedThreadPool(numOfThread);
+            try {
+                client.getFiles(folder, userId, config.fields, file -> executorService
+                        .execute(() -> storeFile(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, client, file)));
+                if (logger.isDebugEnabled()) {
+                    logger.debug("shutting down executor..");
+                }
+                executorService.shutdown();
+                executorService.awaitTermination(60, TimeUnit.SECONDS);
+            } catch (final InterruptedException e) {
+                throw new DataStoreException("Interrupted.", e);
+            } finally {
+                executorService.shutdownNow();
+            }
+            client.asSelf();
         });
+    }
+
+    protected ExecutorService newFixedThreadPool(final int nThreads) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("Executor Thread Pool: {}", nThreads);
+        }
+        return new ThreadPoolExecutor(nThreads, nThreads, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(nThreads),
+                new ThreadPoolExecutor.CallerRunsPolicy());
     }
 
     protected void storeFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final Config config,
@@ -163,7 +186,11 @@ public class BoxDataStore extends AbstractDataStore {
         final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
         try {
             final BoxFile.Info info = file.getInfo();
-            final String mimeType = getFileMimeType(file);
+            final String downloadURL = file.getDownloadURL().toExternalForm();
+            if (logger.isDebugEnabled()) {
+                logger.debug("downloadURL: {}", downloadURL);
+            }
+            final String mimeType = getFileMimeType(downloadURL);
             if (Stream.of(config.supportedMimeTypes).noneMatch(mimeType::matches)) {
                 if (logger.isDebugEnabled()) {
                     logger.debug("{} is not an indexing target.", mimeType);
@@ -172,6 +199,9 @@ public class BoxDataStore extends AbstractDataStore {
             }
 
             final String path = getPath(info);
+            if (logger.isDebugEnabled()) {
+                logger.debug("path: {}", path);
+            }
             final UrlFilter urlFilter = config.urlFilter;
             if (urlFilter != null && !urlFilter.match(path)) {
                 if (logger.isDebugEnabled()) {
@@ -194,48 +224,44 @@ public class BoxDataStore extends AbstractDataStore {
             final String fileType = ComponentUtil.getFileTypeHelper().get(mimeType);
 
             fileMap.put(FILE_URL, url);
-            fileMap.put(FILE_CONTENTS, getFileContents(client, file, mimeType, config.ignoreError));
+            fileMap.put(FILE_CONTENTS, getFileContents(client, file, info, downloadURL, mimeType, config.ignoreError));
             fileMap.put(FILE_MIMETYPE, mimeType);
             fileMap.put(FILE_FILETYPE, fileType);
-            try {
-                fileMap.put(FILE_DOWNLOAD_URL, file.getDownloadURL());
-            } catch (final BoxAPIException e) {
-                fileMap.put(FILE_DOWNLOAD_URL, null);
-            }
+            fileMap.put(FILE_DOWNLOAD_URL, downloadURL);
             fileMap.put(FILE_TYPE, info.getType());
             fileMap.put(FILE_ID, info.getID());
-            fileMap.put(FILE_FILE_VERSION, info.getVersion()); //
+            fileMap.put(FILE_FILE_VERSION, info.getVersion());
             fileMap.put(FILE_SEQUENCE_ID, info.getSequenceID());
             fileMap.put(FILE_ETAG, info.getEtag());
             fileMap.put(FILE_SHA1, info.getSha1());
             fileMap.put(FILE_NAME, info.getName());
             fileMap.put(FILE_DESCRIPTION, info.getDescription());
             fileMap.put(FILE_SIZE, info.getSize());
-            fileMap.put(FILE_PATH_COLLECTION, info.getPathCollection()); //
+            fileMap.put(FILE_PATH_COLLECTION, info.getPathCollection());
             fileMap.put(FILE_CREATED_AT, info.getCreatedAt());
             fileMap.put(FILE_MODIFIED_AT, info.getModifiedAt());
             fileMap.put(FILE_TRASHED_AT, info.getTrashedAt());
             fileMap.put(FILE_PURGED_AT, info.getPurgedAt());
             fileMap.put(FILE_CONTENT_CREATED_AT, info.getContentCreatedAt());
             fileMap.put(FILE_CONTENT_MODIFIED_AT, info.getContentModifiedAt());
-            fileMap.put(FILE_CREATED_BY, info.getCreatedBy()); //
-            fileMap.put(FILE_MODIFIED_BY, info.getModifiedBy()); //
-            fileMap.put(FILE_OWNED_BY, info.getOwnedBy()); //
-            fileMap.put(FILE_SHARED_LINK, info.getSharedLink()); //
-            fileMap.put(FILE_PARENT, info.getParent()); //
+            fileMap.put(FILE_CREATED_BY, info.getCreatedBy());
+            fileMap.put(FILE_MODIFIED_BY, info.getModifiedBy());
+            fileMap.put(FILE_OWNED_BY, info.getOwnedBy());
+            fileMap.put(FILE_SHARED_LINK, info.getSharedLink());
+            fileMap.put(FILE_PARENT, info.getParent());
             fileMap.put(FILE_ITEM_STATUS, info.getItemStatus());
             fileMap.put(FILE_VERSION_NUMBER, info.getVersionNumber());
             fileMap.put(FILE_COMMENT_COUNT, info.getCommentCount());
-            fileMap.put(FILE_PERMISSIONS, info.getPermissions()); //
-            fileMap.put(FILE_TAGS, info.getTags()); //
-            fileMap.put(FILE_LOCK, info.getLock()); //
+            fileMap.put(FILE_PERMISSIONS, info.getPermissions());
+            fileMap.put(FILE_TAGS, info.getTags());
+            fileMap.put(FILE_LOCK, info.getLock());
             fileMap.put(FILE_EXTENSION, info.getExtension());
             fileMap.put(FILE_IS_PACKAGE, info.getIsPackage());
 
             fileMap.put(FILE_IS_WATERMARK, info.getIsWatermarked());
-            // fileMap.put(FILE_METADATA, file.getMetadata()); //
-            fileMap.put(FILE_COLLECTIONS, info.getCollections()); //
-            fileMap.put(FILE_REPRESENTATIONS, info.getRepresentations()); //
+            // fileMap.put(FILE_METADATA, file.getMetadata());
+            fileMap.put(FILE_COLLECTIONS, info.getCollections());
+            fileMap.put(FILE_REPRESENTATIONS, info.getRepresentations());
 
             resultMap.put(FILE, fileMap);
             if (logger.isDebugEnabled()) {
@@ -281,32 +307,28 @@ public class BoxDataStore extends AbstractDataStore {
         }
     }
 
-    protected String getFileContents(final BoxClient client, final BoxFile file, final String mimeType, final boolean ignoreError) {
-        try {
-            final BoxFile.Info info = file.getInfo();
-            try (final InputStream in = client.getFileInputStream(file)) {
-                if ("boxnote".equals(ResourceUtil.getExtension(info.getName()))) {
-                    return getBoxNoteContents(in);
-                }
-                Extractor extractor = ComponentUtil.getExtractorFactory().getExtractor(mimeType);
-                if (extractor == null) {
-                    if (logger.isDebugEnabled()) {
-                        logger.debug("use a default extractor as {} by {}", extractorName, mimeType);
-                    }
-                    extractor = ComponentUtil.getComponent(extractorName);
-                }
-                return extractor.getText(in, null).getContent();
-            } catch (final Exception e) {
-                if (ignoreError) {
-                    logger.warn("Failed to get contents: " + info.getName(), e);
-                    return StringUtil.EMPTY;
-                } else {
-                    throw new DataStoreCrawlingException(file.getPreviewLink().toString(), "Failed to get contents: " + info.getName(), e);
-                }
+    protected String getFileContents(final BoxClient client, final BoxFile file, final BoxFile.Info info, final String downloadURL,
+            final String mimeType, final boolean ignoreError) {
+        final String name = info.getName();
+        try (final InputStream in = client.getFileInputStream(file)) {
+            if ("boxnote".equals(ResourceUtil.getExtension(name))) {
+                return getBoxNoteContents(in);
             }
-        } catch (final BoxAPIException e) {
-            logger.warn("[Box API Error] Failed to get file content. : responseCode = {}, response = {}" , e.getResponseCode(), e.getResponse());
-            return StringUtil.EMPTY;
+            Extractor extractor = ComponentUtil.getExtractorFactory().getExtractor(mimeType);
+            if (extractor == null) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("use a default extractor as {} by {}", extractorName, mimeType);
+                }
+                extractor = ComponentUtil.getComponent(extractorName);
+            }
+            return extractor.getText(in, null).getContent();
+        } catch (final Exception e) {
+            if (ignoreError) {
+                logger.warn("Failed to get contents: " + name, e);
+                return StringUtil.EMPTY;
+            } else {
+                throw new DataStoreCrawlingException(downloadURL, "Failed to get contents: " + name, e);
+            }
         }
     }
 
@@ -316,8 +338,8 @@ public class BoxDataStore extends AbstractDataStore {
         return node.get("atext").get("text").asText();
     }
 
-    protected String getFileMimeType(final BoxFile file) {
-        return Curl.head(file.getDownloadURL().toString()).execute().getHeaderValue("content-type");
+    protected String getFileMimeType(final String downloadURL) {
+        return Curl.head(downloadURL).execute().getHeaderValue("content-type");
     }
 
     protected String getPath(final BoxItem.Info info) {
@@ -329,13 +351,17 @@ public class BoxDataStore extends AbstractDataStore {
     }
 
     protected BoxClient createClient(final Map<String, String> paramMap) {
-        return new BoxClient(paramMap);
+        final BoxClient client = new BoxClient();
+        client.setInitParameterMap(paramMap.entrySet().stream().collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
+        client.init();
+        return client;
     }
 
     protected static class Config {
         final String[] fields;
         final long maxSize;
-        final boolean ignoreFolder, ignoreError;
+        final boolean ignoreFolder;
+        final boolean ignoreError;
         final String[] supportedMimeTypes;
         final UrlFilter urlFilter;
 
