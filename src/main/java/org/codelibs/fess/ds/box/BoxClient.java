@@ -19,6 +19,8 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.net.Proxy;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.function.Consumer;
 
 import org.apache.commons.io.output.DeferredFileOutputStream;
@@ -35,6 +37,7 @@ import org.slf4j.LoggerFactory;
 
 import com.box.sdk.BoxAPIConnection;
 import com.box.sdk.BoxAPIException;
+import com.box.sdk.BoxAPIResponseException;
 import com.box.sdk.BoxConfig;
 import com.box.sdk.BoxDeveloperEditionAPIConnection;
 import com.box.sdk.BoxFile;
@@ -57,6 +60,7 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
     protected static final String PRIVATE_KEY_PARAM = "private_key";
     protected static final String PASSPHRASE_PARAM = "passphrase";
     protected static final String ENTERPRISE_ID_PARAM = "enterprise_id";
+    protected static final String MAX_RETRY_COUNT = "max_retry_count";
 
     protected static final String PROXY_HOST = "proxy_host";
     protected static final String PROXY_PORT = "proxy_port";
@@ -70,6 +74,10 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
     protected BoxAPIConnection connection;
 
     protected TimeoutTask refreshTokenTask;
+
+    protected BoxConfig boxConfig;
+
+    protected int maxRetryCount;
 
     @Override
     public synchronized void init() {
@@ -101,7 +109,21 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
         jwtPreferences.setPrivateKeyPassword(passphrase);
         jwtPreferences.setPrivateKey(privateKey);
         jwtPreferences.setEncryptionAlgorithm(EncryptionAlgorithm.RSA_SHA_256);
-        final BoxConfig boxConfig = new BoxConfig(clientId, clientSecret, enterpriseId, jwtPreferences);
+        boxConfig = new BoxConfig(clientId, clientSecret, enterpriseId, jwtPreferences);
+
+        maxRetryCount = getInitParameter(MAX_RETRY_COUNT, 10, Integer.class);
+
+        createConnction();
+    }
+
+    protected void createConnction() {
+        if (logger.isDebugEnabled()) {
+            logger.debug("creating Box Connnection");
+        }
+
+        if (refreshTokenTask != null) {
+            refreshTokenTask.cancel();
+        }
 
         try {
             final BoxDeveloperEditionAPIConnection con = BoxDeveloperEditionAPIConnection.getAppEnterpriseConnection(boxConfig);
@@ -176,7 +198,7 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
         } else {
             children = folder.getChildren();
         }
-        children.forEach(info -> {
+        final Consumer<BoxItem.Info> processor = info -> {
             if (logger.isDebugEnabled()) {
                 logger.debug("item info: {}:{}", info.getID(), info.getName());
             }
@@ -190,6 +212,46 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
             default:
                 logger.warn("Unknown item type: {}", info.getType());
                 break;
+            }
+        };
+        children.forEach(info -> {
+            for (int i = 0; i < maxRetryCount; i++) {
+                try {
+                    processor.accept(info);
+                    return;
+                } catch (final BoxAPIResponseException e) {
+                    if (e.getResponseCode() != 401) {
+                        throw e;
+                    }
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("Failed to access " + info.getID(), e);
+                    }
+                } catch (final RuntimeException e) {
+                    final Set<Throwable> exceptionSet = new HashSet<>();
+                    Throwable cause = e.getCause();
+                    while (cause != null && !(cause instanceof BoxAPIResponseException)) {
+                        exceptionSet.add(cause);
+                        cause = cause.getCause();
+                        if (cause != null && exceptionSet.contains(cause)) {
+                            cause = null;
+                        }
+                    }
+                    if (cause == null) {
+                        throw e;
+                    }
+                    if (((BoxAPIException) cause).getResponseCode() != 401) {
+                        throw e;
+                    }
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("Failed to access " + info.getID(), e);
+                    }
+                }
+                final BoxAPIConnection con = connection;
+                synchronized (boxConfig) {
+                    if (con == connection) {
+                        createConnction();
+                    }
+                }
             }
         });
     }
