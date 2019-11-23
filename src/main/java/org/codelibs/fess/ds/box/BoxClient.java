@@ -29,6 +29,7 @@ import org.codelibs.core.lang.StringUtil;
 import org.codelibs.core.timer.TimeoutManager;
 import org.codelibs.core.timer.TimeoutTask;
 import org.codelibs.fess.crawler.client.AbstractCrawlerClient;
+import org.codelibs.fess.crawler.client.CrawlerClientCreator;
 import org.codelibs.fess.crawler.exception.CrawlingAccessException;
 import org.codelibs.fess.crawler.util.TemporaryFileInputStream;
 import org.codelibs.fess.exception.DataStoreException;
@@ -78,6 +79,11 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
     protected BoxConfig boxConfig;
 
     protected int maxRetryCount;
+
+    public void register() {
+        final CrawlerClientCreator creator = crawlerContainer.getComponent("crawlerClientCreator");
+        creator.register("box:.*", "boxClient");
+    }
 
     @Override
     public synchronized void init() {
