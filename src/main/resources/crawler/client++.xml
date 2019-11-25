@@ -2,8 +2,19 @@
 <!DOCTYPE components PUBLIC "-//DBFLUTE//DTD LastaDi 1.0//EN"
 	"http://dbflute.org/meta/lastadi10.dtd">
 <components namespace="fessCrawler">
+
 	<component name="boxClient" class="org.codelibs.fess.ds.box.BoxClient"
 		instance="prototype">
 		<postConstruct name="register"></postConstruct>
 	</component>
+
+	<component name="htmlThumbnailGenerator" class="org.codelibs.fess.thumbnail.impl.HtmlTagBasedGenerator">
+		<property name="name">"htmlThumbnailGenerator"</property>
+		<postConstruct name="addCondition">
+			<arg>"thumbnail"</arg>
+			<arg>"box:.*"</arg>
+		</postConstruct>
+		<postConstruct name="register"></postConstruct>
+	</component>
+
 </components>
