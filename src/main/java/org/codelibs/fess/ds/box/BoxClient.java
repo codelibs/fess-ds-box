@@ -15,6 +15,8 @@
  */
 package org.codelibs.fess.ds.box;
 
+import javax.annotation.Resource;
+import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
@@ -25,12 +27,21 @@ import java.util.function.Consumer;
 
 import org.apache.commons.io.output.DeferredFileOutputStream;
 import org.apache.commons.lang3.SystemUtils;
+import org.codelibs.core.io.CloseableUtil;
+import org.codelibs.core.io.InputStreamUtil;
 import org.codelibs.core.lang.StringUtil;
 import org.codelibs.core.timer.TimeoutManager;
 import org.codelibs.core.timer.TimeoutTask;
+import org.codelibs.fess.crawler.Constants;
 import org.codelibs.fess.crawler.client.AbstractCrawlerClient;
 import org.codelibs.fess.crawler.client.CrawlerClientCreator;
+import org.codelibs.fess.crawler.entity.RequestData;
+import org.codelibs.fess.crawler.entity.ResponseData;
+import org.codelibs.fess.crawler.exception.CrawlerSystemException;
 import org.codelibs.fess.crawler.exception.CrawlingAccessException;
+import org.codelibs.fess.crawler.exception.MaxLengthExceededException;
+import org.codelibs.fess.crawler.helper.ContentLengthHelper;
+import org.codelibs.fess.crawler.helper.MimeTypeHelper;
 import org.codelibs.fess.crawler.util.TemporaryFileInputStream;
 import org.codelibs.fess.exception.DataStoreException;
 import org.slf4j.Logger;
@@ -80,6 +91,10 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
 
     protected int maxRetryCount;
 
+    protected String charset = Constants.UTF_8;
+    @Resource
+    protected ContentLengthHelper contentLengthHelper;
+
     public void register() {
         final CrawlerClientCreator creator = crawlerContainer.getComponent("crawlerClientCreator");
         creator.register("box:.*", "boxClient");
@@ -120,6 +135,87 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
         maxRetryCount = getInitParameter(MAX_RETRY_COUNT, 10, Integer.class);
 
         createConnction();
+    }
+
+    @Override
+    public ResponseData execute(final RequestData data) {
+        // TODO
+        final ResponseData responseData = new ResponseData();
+        responseData.setMethod(Constants.GET_METHOD);
+        final String url = data.getUrl().trim().substring(4);
+        try {
+            final String fileId = getIdFromUrl(url);
+            logger.info("fileId = {}", fileId);
+            responseData.setUrl(url);
+            BoxFile boxFile = null;
+            BoxFile.Info info = null;
+
+            if(connection == null) {
+                logger.info("Creating box api connection...");
+                createConnction();
+            }
+
+            try {
+                boxFile = new BoxFile(connection, fileId);
+                info = boxFile.getInfo();
+            } catch (final Exception e) { // TODO
+                logger.warn("Could not parse url: " + url, e);
+                return responseData;
+            }
+
+            if (boxFile == null || info == null) {
+                logger.warn("Could not get boxFile {}", url);
+                responseData.setHttpStatusCode(Constants.NOT_FOUND_STATUS_CODE);
+                responseData.setCharSet(charset);
+                responseData.setContentLength(0);
+            } else {
+                // check file size
+                responseData.setContentLength(info.getSize());
+                checkMaxContentLength(responseData);
+
+                //            parseFileOwnerAttribute(responseData, file);
+
+                responseData.setHttpStatusCode(Constants.OK_STATUS_CODE);
+                // responseData.setCharSet(info);
+                responseData.setLastModified(info.getContentModifiedAt());
+
+                final MimeTypeHelper mimeTypeHelper = crawlerContainer.getComponent("mimeTypeHelper");
+                try (final InputStream is = new BufferedInputStream(getFileInputStream(boxFile))) {
+                    responseData.setMimeType(mimeTypeHelper.getContentType(is, info.getName()));
+                } catch (final Exception e) {
+                    responseData.setMimeType(mimeTypeHelper.getContentType(null, info.getName()));
+                }
+
+                if (contentLengthHelper != null) {
+                    final long maxLength = contentLengthHelper.getMaxLength(responseData.getMimeType());
+                    if (responseData.getContentLength() > maxLength) {
+                        throw new MaxLengthExceededException("The content length (" + responseData.getContentLength()
+                                + " byte) is over " + maxLength + " byte. The url is " + url);
+                    }
+                }
+
+                if (info.getSize() < maxCachedContentSize) {
+                    try (InputStream contentStream = new BufferedInputStream(getFileInputStream(boxFile))) {
+                        responseData.setResponseBody(InputStreamUtil.getBytes(contentStream));
+                    } catch (final Exception e) {
+                        logger.warn("I/O Exception.", e);
+                        responseData.setHttpStatusCode(Constants.SERVER_ERROR_STATUS_CODE);
+                    }
+                }
+            }
+        } catch (final CrawlerSystemException e) {
+            CloseableUtil.closeQuietly(responseData);
+            throw e;
+        } catch (final Exception e) {
+            CloseableUtil.closeQuietly(responseData);
+            throw new CrawlingAccessException("Could not access " + url, e);
+        }
+
+        return responseData;
+    }
+
+    protected String getIdFromUrl(final String url) {
+        return url.replaceFirst(".*/([^/?]+).*", "$1");
     }
 
     protected void createConnction() {
