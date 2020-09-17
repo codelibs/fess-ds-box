@@ -18,8 +18,10 @@ package org.codelibs.fess.ds.box;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -27,6 +29,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
 
 import org.codelibs.core.io.ResourceUtil;
 import org.codelibs.core.lang.StringUtil;
@@ -49,6 +52,7 @@ import org.lastaflute.di.core.exception.ComponentNotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.box.sdk.BoxCollaboration;
 import com.box.sdk.BoxFile;
 import com.box.sdk.BoxFolder;
 import com.box.sdk.BoxItem;
@@ -263,6 +267,8 @@ public class BoxDataStore extends AbstractDataStore {
             fileMap.put(FILE_COLLECTIONS, info.getCollections());
             fileMap.put(FILE_REPRESENTATIONS, info.getRepresentations());
 
+            fileMap.put("api", new BoxFileAPI(file));
+
             resultMap.put(FILE, fileMap);
             if (logger.isDebugEnabled()) {
                 logger.debug("fileMap: {}", fileMap);
@@ -433,4 +439,20 @@ public class BoxDataStore extends AbstractDataStore {
         }
     }
 
+    public static class BoxFileAPI {
+
+        private BoxFile file;
+
+        public BoxFileAPI(BoxFile file) {
+            this.file = file;
+        }
+
+        public List<BoxCollaboration.Info> getAllFileCollaborations() {
+            Iterable<BoxCollaboration.Info> collaborations = file.getAllFileCollaborations();
+            if (collaborations == null) {
+                return Collections.emptyList();
+            }
+            return StreamSupport.stream(collaborations.spliterator(), false).collect(Collectors.toList());
+        }
+    }
 }
