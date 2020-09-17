@@ -35,7 +35,7 @@
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
-		<box.version>2.33.0</box.version>
+		<box.version>2.50.1</box.version>
 
 		<fess.version>13.9.0</fess.version>
 
