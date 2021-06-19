@@ -1,4 +1,5 @@
-Box Data Store for Fess [![Build Status](https://travis-ci.org/codelibs/fess-ds-box.svg?branch=master)](https://travis-ci.org/codelibs/fess-ds-box)
+Box Data Store for Fess
+[![Java CI with Maven](https://github.com/codelibs/fess-ds-box/actions/workflows/maven.yml/badge.svg)](https://github.com/codelibs/fess-ds-box/actions/workflows/maven.yml)
 ==========================
 
 ## Overview
