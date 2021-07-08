@@ -333,9 +333,8 @@ public class BoxDataStore extends AbstractDataStore {
             if (ignoreError) {
                 logger.warn("Failed to get contents: " + name, e);
                 return StringUtil.EMPTY;
-            } else {
-                throw new DataStoreCrawlingException(downloadURL, "Failed to get contents: " + name, e);
             }
+            throw new DataStoreCrawlingException(downloadURL, "Failed to get contents: " + name, e);
         }
     }
 
@@ -399,11 +398,11 @@ public class BoxDataStore extends AbstractDataStore {
         }
 
         private boolean isIgnoreFolder(final Map<String, String> paramMap) {
-            return paramMap.getOrDefault(IGNORE_FOLDER, Constants.TRUE).equalsIgnoreCase(Constants.TRUE);
+            return Constants.TRUE.equalsIgnoreCase(paramMap.getOrDefault(IGNORE_FOLDER, Constants.TRUE));
         }
 
         private boolean isIgnoreError(final Map<String, String> paramMap) {
-            return paramMap.getOrDefault(IGNORE_ERROR, Constants.TRUE).equalsIgnoreCase(Constants.TRUE);
+            return Constants.TRUE.equalsIgnoreCase(paramMap.getOrDefault(IGNORE_ERROR, Constants.TRUE));
         }
 
         private String[] getSupportedMimeTypes(final Map<String, String> paramMap) {
@@ -442,14 +441,14 @@ public class BoxDataStore extends AbstractDataStore {
 
     public static class BoxFileAPI {
 
-        private BoxFile file;
+        private final BoxFile file;
 
-        public BoxFileAPI(BoxFile file) {
+        public BoxFileAPI(final BoxFile file) {
             this.file = file;
         }
 
         public List<BoxCollaboration.Info> getAllFileCollaborations() {
-            Iterable<BoxCollaboration.Info> collaborations = file.getAllFileCollaborations();
+            final Iterable<BoxCollaboration.Info> collaborations = file.getAllFileCollaborations();
             if (collaborations == null) {
                 return Collections.emptyList();
             }

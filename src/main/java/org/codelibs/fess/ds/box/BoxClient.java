@@ -94,7 +94,7 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
         final String clientId = getInitParameter(CLIENT_ID_PARAM, StringUtil.EMPTY);
         final String clientSecret = getInitParameter(CLIENT_SECRET_PARAM, StringUtil.EMPTY);
         final String publicKeyId = getInitParameter(PUBLIC_KEY_ID_PARAM, StringUtil.EMPTY);
-        final String privateKey = getInitParameter(PRIVATE_KEY_PARAM, StringUtil.EMPTY).replaceAll("\\\\n", "\n");
+        final String privateKey = getInitParameter(PRIVATE_KEY_PARAM, StringUtil.EMPTY).replace("\\n", "\n");
         final String passphrase = getInitParameter(PASSPHRASE_PARAM, StringUtil.EMPTY);
         final String enterpriseId = getInitParameter(ENTERPRISE_ID_PARAM, StringUtil.EMPTY);
 
@@ -236,10 +236,7 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
                             cause = null;
                         }
                     }
-                    if (cause == null) {
-                        throw e;
-                    }
-                    if (((BoxAPIException) cause).getResponseCode() != 401) {
+                    if ((cause == null) || (((BoxAPIException) cause).getResponseCode() != 401)) {
                         throw e;
                     }
                     if (logger.isDebugEnabled()) {
@@ -263,9 +260,8 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
             dfos.flush();
             if (dfos.isInMemory()) {
                 return new ByteArrayInputStream(dfos.getData());
-            } else {
-                return new TemporaryFileInputStream(dfos.getFile());
             }
+            return new TemporaryFileInputStream(dfos.getFile());
         } catch (final BoxAPIException e) {
             throw new CrawlingAccessException("Failed to create an input stream from " + file.getID() + " -> " + e.getResponse(), e);
         } catch (final Exception e) {
