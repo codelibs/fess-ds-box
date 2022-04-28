@@ -15,11 +15,17 @@
  */
 package org.codelibs.fess.ds.box;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.File;
+import java.io.IOException;
+import java.net.URL;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 import org.codelibs.fess.crawler.extractor.ExtractorFactory;
 import org.codelibs.fess.crawler.extractor.impl.TikaExtractor;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
+import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.es.config.exentity.DataConfig;
 import org.codelibs.fess.helper.FileTypeHelper;
 import org.codelibs.fess.util.ComponentUtil;
@@ -27,12 +33,8 @@ import org.dbflute.utflute.lastaflute.LastaFluteTestCase;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.File;
-import java.io.IOException;
-import java.net.URL;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.Map;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 public class BoxDataStoreTest extends LastaFluteTestCase {
 
@@ -76,13 +78,14 @@ public class BoxDataStoreTest extends LastaFluteTestCase {
         ComponentUtil.register(tikaExtractor, "tikaExtractor");
 
         final DataConfig dataConfig = new DataConfig();
-        final Map<String, String> paramMap = new LinkedHashMap<>(config);
+        final DataStoreParams paramMap = new DataStoreParams();
+        config.entrySet().stream().forEach(e -> paramMap.put(e.getKey(), e.getValue()));
         final Map<String, String> scriptMap = new HashMap<>();
         final Map<String, Object> defaultDataMap = new HashMap<>();
 
         dataStore.storeData(dataConfig, new TestCallback() {
             @Override
-            public void test(final Map<String, String> paramMap, final Map<String, Object> dataMap) {
+            public void test(final DataStoreParams paramMap, final Map<String, Object> dataMap) {
                 logger.debug(dataMap.toString());
             }
         }, paramMap, scriptMap, defaultDataMap);
@@ -116,10 +119,10 @@ public class BoxDataStoreTest extends LastaFluteTestCase {
         private long documentSize = 0;
         private long executeTime = 0;
 
-        abstract void test(Map<String, String> paramMap, Map<String, Object> dataMap);
+        abstract void test(DataStoreParams paramMap, Map<String, Object> dataMap);
 
         @Override
-        public void store(Map<String, String> paramMap, Map<String, Object> dataMap) {
+        public void store(DataStoreParams paramMap, Map<String, Object> dataMap) {
             final long startTime = System.currentTimeMillis();
             test(paramMap, dataMap);
             executeTime += System.currentTimeMillis() - startTime;

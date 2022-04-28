@@ -44,9 +44,13 @@ import org.codelibs.fess.crawler.extractor.Extractor;
 import org.codelibs.fess.crawler.filter.UrlFilter;
 import org.codelibs.fess.ds.AbstractDataStore;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
+import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.es.config.exentity.DataConfig;
 import org.codelibs.fess.exception.DataStoreCrawlingException;
 import org.codelibs.fess.exception.DataStoreException;
+import org.codelibs.fess.helper.CrawlerStatsHelper;
+import org.codelibs.fess.helper.CrawlerStatsHelper.StatsAction;
+import org.codelibs.fess.helper.CrawlerStatsHelper.StatsKeyObject;
 import org.codelibs.fess.util.ComponentUtil;
 import org.lastaflute.di.core.exception.ComponentNotFoundException;
 import org.slf4j.Logger;
@@ -129,7 +133,7 @@ public class BoxDataStore extends AbstractDataStore {
     }
 
     @Override
-    public void storeData(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, String> paramMap,
+    public void storeData(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap) {
         final Config config = new Config(paramMap);
         if (logger.isDebugEnabled()) {
@@ -142,13 +146,13 @@ public class BoxDataStore extends AbstractDataStore {
     }
 
     protected void crawlUserFolders(final DataConfig dataConfig, final IndexUpdateCallback callback, final Config config,
-            final Map<String, String> paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
+            final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final BoxClient client) {
         if (logger.isDebugEnabled()) {
             logger.debug("crawling user folders.");
         }
-        final int numOfThread = Integer.parseInt(paramMap.getOrDefault(NUMBER_OF_THREADS, "1"));
-        final String filterTerm = paramMap.get(FILTER_TERM);
+        final int numOfThread = Integer.parseInt(paramMap.getAsString(NUMBER_OF_THREADS, "1"));
+        final String filterTerm = paramMap.getAsString(FILTER_TERM);
         client.asSelf();
         client.getUsers(filterTerm, info -> {
             final BoxUser user = info.getResource();
@@ -185,10 +189,13 @@ public class BoxDataStore extends AbstractDataStore {
     }
 
     protected void storeFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final Config config,
-            final Map<String, String> paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
+            final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final BoxClient client, final BoxFile file) {
+        final CrawlerStatsHelper crawlerStatsHelper = ComponentUtil.getCrawlerStatsHelper();
         final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
+        final StatsKeyObject statsKey = new StatsKeyObject(file.getID());
         try {
+            crawlerStatsHelper.begin(statsKey);
             final BoxFile.Info info = file.getInfo();
             final String downloadURL = file.getDownloadURL().toExternalForm();
             if (logger.isDebugEnabled()) {
@@ -199,6 +206,7 @@ public class BoxDataStore extends AbstractDataStore {
                 if (logger.isDebugEnabled()) {
                     logger.debug("{} is not an indexing target.", mimeType);
                 }
+                crawlerStatsHelper.discard(statsKey);
                 return;
             }
 
@@ -217,7 +225,7 @@ public class BoxDataStore extends AbstractDataStore {
             final String url = getUrl(client, info);
             logger.info("Crawling URL: {}", url);
 
-            final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap);
+            final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap.asMap());
             final Map<String, Object> fileMap = new HashMap<>();
 
             if (info.getSize() > config.maxSize) {
@@ -270,6 +278,9 @@ public class BoxDataStore extends AbstractDataStore {
             fileMap.put("api", new BoxFileAPI(file));
 
             resultMap.put(FILE, fileMap);
+
+            crawlerStatsHelper.record(statsKey, StatsAction.PREPARED);
+
             if (logger.isDebugEnabled()) {
                 logger.debug("fileMap: {}", fileMap);
             }
@@ -281,11 +292,15 @@ public class BoxDataStore extends AbstractDataStore {
                     dataMap.put(entry.getKey(), convertValue);
                 }
             }
+
+            crawlerStatsHelper.record(statsKey, StatsAction.EVALUATED);
+
             if (logger.isDebugEnabled()) {
                 logger.debug("dataMap: {}", dataMap);
             }
 
             callback.store(paramMap, dataMap);
+            crawlerStatsHelper.record(statsKey, StatsAction.FINISHED);
         } catch (final CrawlingAccessException e) {
             logger.warn("Crawling Access Exception at : " + dataMap, e);
 
@@ -307,10 +322,14 @@ public class BoxDataStore extends AbstractDataStore {
 
             final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
             failureUrlService.store(dataConfig, errorName, "", target);
+            crawlerStatsHelper.record(statsKey, StatsAction.ACCESS_EXCEPTION);
         } catch (final Throwable t) {
             logger.warn("Crawling Access Exception at : " + dataMap, t);
             final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
             failureUrlService.store(dataConfig, t.getClass().getCanonicalName(), "", t);
+            crawlerStatsHelper.record(statsKey, StatsAction.EXCEPTION);
+        } finally {
+            crawlerStatsHelper.done(statsKey);
         }
     }
 
@@ -356,9 +375,9 @@ public class BoxDataStore extends AbstractDataStore {
         return client.getBaseUrl() + "/" + info.getType() + "/" + info.getID();
     }
 
-    protected BoxClient createClient(final Map<String, String> paramMap) {
+    protected BoxClient createClient(final DataStoreParams paramMap) {
         final BoxClient client = new BoxClient();
-        client.setInitParameterMap(paramMap.entrySet().stream().collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
+        client.setInitParameterMap(paramMap.asMap());
         client.init();
         return client;
     }
@@ -371,7 +390,7 @@ public class BoxDataStore extends AbstractDataStore {
         final String[] supportedMimeTypes;
         final UrlFilter urlFilter;
 
-        Config(final Map<String, String> paramMap) {
+        Config(final DataStoreParams paramMap) {
             fields = getFields(paramMap);
             maxSize = getMaxSize(paramMap);
             ignoreFolder = isIgnoreFolder(paramMap);
@@ -380,16 +399,16 @@ public class BoxDataStore extends AbstractDataStore {
             urlFilter = getUrlFilter(paramMap);
         }
 
-        private String[] getFields(final Map<String, String> paramMap) {
-            final String value = paramMap.get(FIELDS);
+        private String[] getFields(final DataStoreParams paramMap) {
+            final String value = paramMap.getAsString(FIELDS);
             if (value != null) {
                 return StreamUtil.split(value, ",").get(stream -> stream.map(String::trim).toArray(String[]::new));
             }
             return null;
         }
 
-        private long getMaxSize(final Map<String, String> paramMap) {
-            final String value = paramMap.get(MAX_SIZE);
+        private long getMaxSize(final DataStoreParams paramMap) {
+            final String value = paramMap.getAsString(MAX_SIZE);
             try {
                 return StringUtil.isNotBlank(value) ? Long.parseLong(value) : DEFAULT_MAX_SIZE;
             } catch (final NumberFormatException e) {
@@ -397,35 +416,35 @@ public class BoxDataStore extends AbstractDataStore {
             }
         }
 
-        private boolean isIgnoreFolder(final Map<String, String> paramMap) {
-            return Constants.TRUE.equalsIgnoreCase(paramMap.getOrDefault(IGNORE_FOLDER, Constants.TRUE));
+        private boolean isIgnoreFolder(final DataStoreParams paramMap) {
+            return Constants.TRUE.equalsIgnoreCase(paramMap.getAsString(IGNORE_FOLDER, Constants.TRUE));
         }
 
-        private boolean isIgnoreError(final Map<String, String> paramMap) {
-            return Constants.TRUE.equalsIgnoreCase(paramMap.getOrDefault(IGNORE_ERROR, Constants.TRUE));
+        private boolean isIgnoreError(final DataStoreParams paramMap) {
+            return Constants.TRUE.equalsIgnoreCase(paramMap.getAsString(IGNORE_ERROR, Constants.TRUE));
         }
 
-        private String[] getSupportedMimeTypes(final Map<String, String> paramMap) {
-            return StreamUtil.split(paramMap.getOrDefault(SUPPORTED_MIMETYPES, ".*"), ",")
+        private String[] getSupportedMimeTypes(final DataStoreParams paramMap) {
+            return StreamUtil.split(paramMap.getAsString(SUPPORTED_MIMETYPES, ".*"), ",")
                     .get(stream -> stream.map(String::trim).toArray(String[]::new));
         }
 
-        private UrlFilter getUrlFilter(final Map<String, String> paramMap) {
+        private UrlFilter getUrlFilter(final DataStoreParams paramMap) {
             final UrlFilter urlFilter;
             try {
                 urlFilter = ComponentUtil.getComponent(UrlFilter.class);
             } catch (final ComponentNotFoundException e) {
                 return null;
             }
-            final String include = paramMap.get(INCLUDE_PATTERN);
+            final String include = paramMap.getAsString(INCLUDE_PATTERN);
             if (StringUtil.isNotBlank(include)) {
                 urlFilter.addInclude(include);
             }
-            final String exclude = paramMap.get(EXCLUDE_PATTERN);
+            final String exclude = paramMap.getAsString(EXCLUDE_PATTERN);
             if (StringUtil.isNotBlank(exclude)) {
                 urlFilter.addExclude(exclude);
             }
-            urlFilter.init(paramMap.get(Constants.CRAWLING_INFO_ID));
+            urlFilter.init(paramMap.getAsString(Constants.CRAWLING_INFO_ID));
             if (logger.isDebugEnabled()) {
                 logger.debug("urlFilter: {}", urlFilter);
             }
