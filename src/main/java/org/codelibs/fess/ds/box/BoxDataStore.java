@@ -194,6 +194,7 @@ public class BoxDataStore extends AbstractDataStore {
         final CrawlerStatsHelper crawlerStatsHelper = ComponentUtil.getCrawlerStatsHelper();
         final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
         final StatsKeyObject statsKey = new StatsKeyObject(file.getID());
+        paramMap.put(Constants.CRAWLER_STATS_KEY, statsKey);
         try {
             crawlerStatsHelper.begin(statsKey);
             final BoxFile.Info info = file.getInfo();
@@ -299,10 +300,14 @@ public class BoxDataStore extends AbstractDataStore {
                 logger.debug("dataMap: {}", dataMap);
             }
 
+            if (dataMap.get("url") instanceof String statsUrl) {
+                statsKey.setUrl(statsUrl);
+            }
+
             callback.store(paramMap, dataMap);
             crawlerStatsHelper.record(statsKey, StatsAction.FINISHED);
         } catch (final CrawlingAccessException e) {
-            logger.warn("Crawling Access Exception at : " + dataMap, e);
+            logger.warn("Crawling Access Exception at : {}", dataMap, e);
 
             Throwable target = e;
             if (target instanceof MultipleCrawlingAccessException) {
@@ -324,7 +329,7 @@ public class BoxDataStore extends AbstractDataStore {
             failureUrlService.store(dataConfig, errorName, "", target);
             crawlerStatsHelper.record(statsKey, StatsAction.ACCESS_EXCEPTION);
         } catch (final Throwable t) {
-            logger.warn("Crawling Access Exception at : " + dataMap, t);
+            logger.warn("Crawling Access Exception at : {}", dataMap, t);
             final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
             failureUrlService.store(dataConfig, t.getClass().getCanonicalName(), "", t);
             crawlerStatsHelper.record(statsKey, StatsAction.EXCEPTION);
@@ -350,7 +355,7 @@ public class BoxDataStore extends AbstractDataStore {
             return extractor.getText(in, null).getContent();
         } catch (final Exception e) {
             if (ignoreError) {
-                logger.warn("Failed to get contents: " + name, e);
+                logger.warn("Failed to get contents: {}", name, e);
                 return StringUtil.EMPTY;
             }
             throw new DataStoreCrawlingException(downloadURL, "Failed to get contents: " + name, e);

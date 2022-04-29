@@ -224,7 +224,7 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
                         throw e;
                     }
                     if (logger.isDebugEnabled()) {
-                        logger.debug("Failed to access " + info.getID(), e);
+                        logger.debug("Failed to access {}", info.getID(), e);
                     }
                 } catch (final RuntimeException e) {
                     final Set<Throwable> exceptionSet = new HashSet<>();
@@ -240,7 +240,7 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
                         throw e;
                     }
                     if (logger.isDebugEnabled()) {
-                        logger.debug("Failed to access " + info.getID(), e);
+                        logger.debug("Failed to access {}", info.getID(), e);
                     }
                 }
                 final BoxAPIConnection con = connection;
