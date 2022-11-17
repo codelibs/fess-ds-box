@@ -31,6 +31,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
+import org.codelibs.core.exception.InterruptedRuntimeException;
 import org.codelibs.core.io.ResourceUtil;
 import org.codelibs.core.lang.StringUtil;
 import org.codelibs.core.stream.StreamUtil;
@@ -172,7 +173,7 @@ public class BoxDataStore extends AbstractDataStore {
                 executorService.shutdown();
                 executorService.awaitTermination(60, TimeUnit.SECONDS);
             } catch (final InterruptedException e) {
-                throw new DataStoreException("Interrupted.", e);
+                throw new InterruptedRuntimeException(e);
             } finally {
                 executorService.shutdownNow();
             }
