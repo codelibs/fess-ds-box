@@ -346,14 +346,8 @@ public class BoxDataStore extends AbstractDataStore {
             if ("boxnote".equals(ResourceUtil.getExtension(name))) {
                 return getBoxNoteContents(in);
             }
-            Extractor extractor = ComponentUtil.getExtractorFactory().getExtractor(mimeType);
-            if (extractor == null) {
-                if (logger.isDebugEnabled()) {
-                    logger.debug("use a default extractor as {} by {}", extractorName, mimeType);
-                }
-                extractor = ComponentUtil.getComponent(extractorName);
-            }
-            return extractor.getText(in, null).getContent();
+            return ComponentUtil.getExtractorFactory().builder(in, null).mimeType(mimeType).extractorName(extractorName).extract()
+                    .getContent();
         } catch (final Exception e) {
             if (ignoreError) {
                 logger.warn("Failed to get contents: {}", name, e);
