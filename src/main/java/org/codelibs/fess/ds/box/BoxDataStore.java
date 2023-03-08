@@ -349,11 +349,15 @@ public class BoxDataStore extends AbstractDataStore {
             return ComponentUtil.getExtractorFactory().builder(in, null).mimeType(mimeType).extractorName(extractorName).extract()
                     .getContent();
         } catch (final Exception e) {
-            if (ignoreError) {
-                logger.warn("Failed to get contents: {}", name, e);
-                return StringUtil.EMPTY;
+            if (!ignoreError && !ComponentUtil.getFessConfig().isCrawlerIgnoreContentException()) {
+                throw new DataStoreCrawlingException(downloadURL, "Failed to get contents: " + name, e);
             }
-            throw new DataStoreCrawlingException(downloadURL, "Failed to get contents: " + name, e);
+            if (logger.isDebugEnabled()) {
+                logger.warn("Failed to get contents: {}", name, e);
+            } else {
+                logger.warn("Failed to get contents: {}. {}", name, e.getMessage());
+            }
+            return StringUtil.EMPTY;
         }
     }
 
