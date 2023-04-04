@@ -17,7 +17,7 @@
 		<relativePath />
 	</parent>
 	<properties>
-		<box.version>2.50.1</box.version>
+		<box.version>4.0.1</box.version>
 	</properties>
 	<build>
 		<plugins>
