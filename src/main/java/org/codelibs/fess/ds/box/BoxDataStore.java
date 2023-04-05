@@ -41,14 +41,12 @@ import org.codelibs.fess.app.service.FailureUrlService;
 import org.codelibs.fess.crawler.exception.CrawlingAccessException;
 import org.codelibs.fess.crawler.exception.MaxLengthExceededException;
 import org.codelibs.fess.crawler.exception.MultipleCrawlingAccessException;
-import org.codelibs.fess.crawler.extractor.Extractor;
 import org.codelibs.fess.crawler.filter.UrlFilter;
 import org.codelibs.fess.ds.AbstractDataStore;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.es.config.exentity.DataConfig;
 import org.codelibs.fess.exception.DataStoreCrawlingException;
-import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.helper.CrawlerStatsHelper;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsAction;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsKeyObject;
@@ -202,6 +200,7 @@ public class BoxDataStore extends AbstractDataStore {
             final String downloadURL = file.getDownloadURL().toExternalForm();
             if (logger.isDebugEnabled()) {
                 logger.debug("downloadURL: {}", downloadURL);
+                logger.debug("info: {}", info.getJson());
             }
             final String mimeType = getFileMimeType(downloadURL);
             if (Stream.of(config.supportedMimeTypes).noneMatch(mimeType::matches)) {
@@ -466,14 +465,31 @@ public class BoxDataStore extends AbstractDataStore {
 
         private final BoxFile file;
 
+        private Iterable<BoxCollaboration.Info> collaborations;
+
         public BoxFileAPI(final BoxFile file) {
             this.file = file;
+            if (logger.isDebugEnabled()) {
+                loadCollaborations(file);
+            }
+        }
+
+        private void loadCollaborations(final BoxFile file) {
+            collaborations = file.getAllFileCollaborations();
+            if (collaborations == null) {
+                collaborations = Collections.emptyList();
+                if (logger.isDebugEnabled()) {
+                    logger.debug("no collaborations");
+                }
+            } else if (logger.isDebugEnabled()) {
+                logger.debug("collaboration: {}",
+                        StreamSupport.stream(collaborations.spliterator(), false).map(c -> c.getJson()).collect(Collectors.joining(",")));
+            }
         }
 
         public List<BoxCollaboration.Info> getAllFileCollaborations() {
-            final Iterable<BoxCollaboration.Info> collaborations = file.getAllFileCollaborations();
             if (collaborations == null) {
-                return Collections.emptyList();
+                loadCollaborations(file);
             }
             return StreamSupport.stream(collaborations.spliterator(), false).collect(Collectors.toList());
         }
