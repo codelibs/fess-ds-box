@@ -17,6 +17,7 @@ package org.codelibs.fess.ds.box;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -498,26 +499,32 @@ public class BoxDataStore extends AbstractDataStore {
 
         public List<String> getCollaborationRoles() {
             final SystemHelper systemHelper = ComponentUtil.getSystemHelper();
-            return getAllFileCollaborations().stream().map(c -> {
+            final List<String> roleList = new ArrayList<>();
+            getAllFileCollaborations().forEach(c -> {
                 Info accessibleBy = c.getAccessibleBy();
                 if (accessibleBy == null) {
-                    return null;
-                }
-                final String name = accessibleBy.getName();
-                if (StringUtil.isBlank(name)) {
-                    return null;
+                    return;
                 }
                 switch (accessibleBy.getType()) {
                 case USER: {
-                    return systemHelper.getSearchRoleByUser(name);
+                    roleList.add(systemHelper.getSearchRoleByUser(accessibleBy.getID()));
+                    if (StringUtil.isNotBlank(accessibleBy.getLogin())) {
+                        roleList.add(systemHelper.getSearchRoleByUser(accessibleBy.getLogin()));
+                    }
+                    break;
                 }
                 case GROUP: {
-                    return systemHelper.getSearchRoleByGroup(name);
+                    roleList.add(systemHelper.getSearchRoleByGroup(accessibleBy.getID()));
+                    if (StringUtil.isNotBlank(accessibleBy.getLogin())) {
+                        roleList.add(systemHelper.getSearchRoleByGroup(accessibleBy.getLogin()));
+                    }
+                    break;
                 }
                 default:
-                    return null;
+                    break;
                 }
-            }).filter(s -> s != null).collect(Collectors.toList());
+            });
+            return roleList;
         }
     }
 }
