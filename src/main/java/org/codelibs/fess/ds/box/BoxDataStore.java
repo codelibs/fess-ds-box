@@ -50,12 +50,14 @@ import org.codelibs.fess.exception.DataStoreCrawlingException;
 import org.codelibs.fess.helper.CrawlerStatsHelper;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsAction;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsKeyObject;
+import org.codelibs.fess.helper.SystemHelper;
 import org.codelibs.fess.util.ComponentUtil;
 import org.lastaflute.di.core.exception.ComponentNotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.box.sdk.BoxCollaboration;
+import com.box.sdk.BoxCollaborator.Info;
 import com.box.sdk.BoxFile;
 import com.box.sdk.BoxFolder;
 import com.box.sdk.BoxItem;
@@ -492,6 +494,30 @@ public class BoxDataStore extends AbstractDataStore {
                 loadCollaborations(file);
             }
             return StreamSupport.stream(collaborations.spliterator(), false).collect(Collectors.toList());
+        }
+
+        public List<String> getCollaborationRoles() {
+            final SystemHelper systemHelper = ComponentUtil.getSystemHelper();
+            return getAllFileCollaborations().stream().map(c -> {
+                Info accessibleBy = c.getAccessibleBy();
+                if (accessibleBy == null) {
+                    return null;
+                }
+                final String name = accessibleBy.getName();
+                if (StringUtil.isBlank(name)) {
+                    return null;
+                }
+                switch (accessibleBy.getType()) {
+                case USER: {
+                    return systemHelper.getSearchRoleByUser(name);
+                }
+                case GROUP: {
+                    return systemHelper.getSearchRoleByGroup(name);
+                }
+                default:
+                    return null;
+                }
+            }).filter(s -> s != null).collect(Collectors.toList());
         }
     }
 }
