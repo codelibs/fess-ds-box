@@ -500,10 +500,17 @@ public class BoxDataStore extends AbstractDataStore {
         public List<String> getCollaborationRoles() {
             final SystemHelper systemHelper = ComponentUtil.getSystemHelper();
             final List<String> roleList = new ArrayList<>();
-            getAllFileCollaborations().forEach(c -> {
-                Info accessibleBy = c.getAccessibleBy();
+            final List<com.box.sdk.BoxCollaboration.Info> collaborationList = getAllFileCollaborations();
+            if (logger.isDebugEnabled()) {
+                logger.debug("collaborationList: {}", collaborationList.size());
+            }
+            collaborationList.forEach(c -> {
+                final Info accessibleBy = c.getAccessibleBy();
                 if (accessibleBy == null) {
                     return;
+                }
+                if (logger.isDebugEnabled()) {
+                    logger.debug("accessibleBy: {}", accessibleBy.getJson());
                 }
                 switch (accessibleBy.getType()) {
                 case USER: {
@@ -521,6 +528,9 @@ public class BoxDataStore extends AbstractDataStore {
                     break;
                 }
                 default:
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("unknown accessibleBy type.");
+                    }
                     break;
                 }
             });
