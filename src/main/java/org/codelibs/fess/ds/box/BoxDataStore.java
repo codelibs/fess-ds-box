@@ -529,7 +529,7 @@ public class BoxDataStore extends AbstractDataStore {
                 }
                 default:
                     if (logger.isDebugEnabled()) {
-                        logger.debug("unknown accessibleBy type.");
+                        logger.debug("unknown accessibleBy type: {}", accessibleBy.getType());
                     }
                     break;
                 }
