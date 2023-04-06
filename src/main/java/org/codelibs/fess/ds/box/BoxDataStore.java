@@ -468,7 +468,7 @@ public class BoxDataStore extends AbstractDataStore {
 
         private final BoxFile file;
 
-        private Iterable<BoxCollaboration.Info> collaborations;
+        private List<BoxCollaboration.Info> collaborations;
 
         public BoxFileAPI(final BoxFile file) {
             this.file = file;
@@ -478,15 +478,17 @@ public class BoxDataStore extends AbstractDataStore {
         }
 
         private void loadCollaborations(final BoxFile file) {
-            collaborations = file.getAllFileCollaborations();
-            if (collaborations == null) {
+            final Iterable<BoxCollaboration.Info> collaborationItr = file.getAllFileCollaborations();
+            if (collaborationItr == null) {
                 collaborations = Collections.emptyList();
                 if (logger.isDebugEnabled()) {
                     logger.debug("no collaborations");
                 }
-            } else if (logger.isDebugEnabled()) {
-                logger.debug("collaboration: {}",
-                        StreamSupport.stream(collaborations.spliterator(), false).map(c -> c.getJson()).collect(Collectors.joining(",")));
+            } else {
+                collaborations = StreamSupport.stream(collaborationItr.spliterator(), false).collect(Collectors.toList());
+                if (logger.isDebugEnabled()) {
+                    logger.debug("collaboration: {}", collaborations.stream().map(c -> c.getJson()).collect(Collectors.joining(",")));
+                }
             }
         }
 
@@ -494,7 +496,7 @@ public class BoxDataStore extends AbstractDataStore {
             if (collaborations == null) {
                 loadCollaborations(file);
             }
-            return StreamSupport.stream(collaborations.spliterator(), false).collect(Collectors.toList());
+            return collaborations;
         }
 
         public List<String> getCollaborationRoles() {
