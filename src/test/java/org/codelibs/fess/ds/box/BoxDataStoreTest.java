@@ -22,6 +22,8 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codelibs.fess.crawler.extractor.ExtractorFactory;
 import org.codelibs.fess.crawler.extractor.impl.TikaExtractor;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
@@ -30,15 +32,13 @@ import org.codelibs.fess.es.config.exentity.DataConfig;
 import org.codelibs.fess.helper.FileTypeHelper;
 import org.codelibs.fess.util.ComponentUtil;
 import org.dbflute.utflute.lastaflute.LastaFluteTestCase;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 public class BoxDataStoreTest extends LastaFluteTestCase {
 
-    private static final Logger logger = LoggerFactory.getLogger(BoxDataStoreTest.class);
+    private static final Logger logger = LogManager.getLogger(BoxDataStoreTest.class);
 
     private BoxDataStore dataStore;
 

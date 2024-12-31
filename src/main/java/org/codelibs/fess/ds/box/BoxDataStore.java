@@ -32,6 +32,8 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codelibs.core.exception.InterruptedRuntimeException;
 import org.codelibs.core.io.ResourceUtil;
 import org.codelibs.core.lang.StringUtil;
@@ -54,8 +56,6 @@ import org.codelibs.fess.helper.CrawlerStatsHelper.StatsKeyObject;
 import org.codelibs.fess.helper.SystemHelper;
 import org.codelibs.fess.util.ComponentUtil;
 import org.lastaflute.di.core.exception.ComponentNotFoundException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import com.box.sdk.BoxCollaboration;
 import com.box.sdk.BoxCollaborator.Info;
@@ -68,7 +68,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 public class BoxDataStore extends AbstractDataStore {
 
-    private static final Logger logger = LoggerFactory.getLogger(BoxDataStore.class);
+    private static final Logger logger = LogManager.getLogger(BoxDataStore.class);
 
     protected static final long DEFAULT_MAX_SIZE = 10000000L; // 10m
 

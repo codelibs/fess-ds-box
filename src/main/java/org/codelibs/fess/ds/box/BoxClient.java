@@ -25,6 +25,8 @@ import java.util.function.Consumer;
 
 import org.apache.commons.io.output.DeferredFileOutputStream;
 import org.apache.commons.lang3.SystemUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codelibs.core.lang.StringUtil;
 import org.codelibs.core.timer.TimeoutManager;
 import org.codelibs.core.timer.TimeoutTask;
@@ -32,8 +34,6 @@ import org.codelibs.fess.crawler.client.AbstractCrawlerClient;
 import org.codelibs.fess.crawler.exception.CrawlingAccessException;
 import org.codelibs.fess.crawler.util.TemporaryFileInputStream;
 import org.codelibs.fess.exception.DataStoreException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import com.box.sdk.BoxAPIConnection;
 import com.box.sdk.BoxAPIException;
@@ -49,7 +49,7 @@ import com.box.sdk.JWTEncryptionPreferences;
 
 public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
 
-    private static final Logger logger = LoggerFactory.getLogger(BoxClient.class);
+    private static final Logger logger = LogManager.getLogger(BoxClient.class);
 
     protected static final String DEFAULT_REFRESH_TOKEN_INTERVAL = "3540";
 
