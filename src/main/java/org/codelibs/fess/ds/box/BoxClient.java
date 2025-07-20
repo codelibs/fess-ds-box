@@ -143,16 +143,16 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
 
         maxRetryCount = getInitParameter(MAX_RETRY_COUNT, 10, Integer.class);
 
-        createConnction();
+        createConnection();
     }
 
     /**
      * Creates and configures a new Box API connection.
      * This method handles proxy settings and schedules a task to refresh the access token periodically.
      */
-    protected void createConnction() {
+    protected void createConnection() {
         if (logger.isDebugEnabled()) {
-            logger.debug("creating Box Connnection");
+            logger.debug("creating Box Connection");
         }
 
         if (refreshTokenTask != null) {
