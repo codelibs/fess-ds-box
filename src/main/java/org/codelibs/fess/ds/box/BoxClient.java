@@ -47,36 +47,66 @@ import com.box.sdk.BoxUser;
 import com.box.sdk.EncryptionAlgorithm;
 import com.box.sdk.JWTEncryptionPreferences;
 
+/**
+ * A client for accessing Box resources.
+ * It extends {@link AbstractCrawlerClient} and implements {@link AutoCloseable} for resource management.
+ */
 public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
+
+    /**
+     * Default constructor.
+     */
+    public BoxClient() {
+        super();
+    }
 
     private static final Logger logger = LogManager.getLogger(BoxClient.class);
 
+    /** Default interval in seconds for refreshing the access token. */
     protected static final String DEFAULT_REFRESH_TOKEN_INTERVAL = "3540";
 
+    /** Parameter key for the base URL of the Box API. */
     protected static final String BASE_URL = "base_url";
+    /** Parameter key for the client ID. */
     protected static final String CLIENT_ID_PARAM = "client_id";
+    /** Parameter key for the client secret. */
     protected static final String CLIENT_SECRET_PARAM = "client_secret";
+    /** Parameter key for the public key ID. */
     protected static final String PUBLIC_KEY_ID_PARAM = "public_key_id";
+    /** Parameter key for the private key. */
     protected static final String PRIVATE_KEY_PARAM = "private_key";
+    /** Parameter key for the passphrase for the private key. */
     protected static final String PASSPHRASE_PARAM = "passphrase";
+    /** Parameter key for the enterprise ID. */
     protected static final String ENTERPRISE_ID_PARAM = "enterprise_id";
+    /** Parameter key for the maximum number of retries for API calls. */
     protected static final String MAX_RETRY_COUNT = "max_retry_count";
 
+    /** Parameter key for the proxy host. */
     protected static final String PROXY_HOST = "proxy_host";
+    /** Parameter key for the proxy port. */
     protected static final String PROXY_PORT = "proxy_port";
+    /** Parameter key for the refresh token interval. */
     protected static final String REFRESH_TOKEN_INTERVAL_PARAM = "refresh_token_interval";
 
+    /** Constant for the 'file' item type in Box. */
     protected static final String ITEM_TYPE_FILE = "file";
+    /** Constant for the 'folder' item type in Box. */
     protected static final String ITEM_TYPE_FOLDER = "folder";
 
+    /** The base URL for the Box application. */
     protected String baseUrl;
 
+    /** The active Box API connection. */
     protected BoxAPIConnection connection;
 
+    /** The scheduled task for refreshing the access token. */
     protected TimeoutTask refreshTokenTask;
 
+    /** The configuration for the Box API connection. */
     protected BoxConfig boxConfig;
 
+    /** The maximum number of times to retry a failed API call. */
     protected int maxRetryCount;
 
     @Override
@@ -113,12 +143,16 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
 
         maxRetryCount = getInitParameter(MAX_RETRY_COUNT, 10, Integer.class);
 
-        createConnction();
+        createConnection();
     }
 
-    protected void createConnction() {
+    /**
+     * Creates and configures a new Box API connection.
+     * This method handles proxy settings and schedules a task to refresh the access token periodically.
+     */
+    protected void createConnection() {
         if (logger.isDebugEnabled()) {
-            logger.debug("creating Box Connnection");
+            logger.debug("creating Box Connection");
         }
 
         if (refreshTokenTask != null) {
@@ -158,10 +192,19 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
         }, Integer.parseInt(getInitParameter(REFRESH_TOKEN_INTERVAL_PARAM, DEFAULT_REFRESH_TOKEN_INTERVAL)), true);
     }
 
+    /**
+     * Gets an initialization parameter as a String.
+     * @param key the parameter key
+     * @param defaultValue the default value if the parameter is not found
+     * @return the parameter value
+     */
     protected String getInitParameter(final String key, final String defaultValue) {
         return getInitParameter(key, defaultValue, String.class);
     }
 
+    /**
+     * Closes the Box client, revoking the current access token and stopping the refresh task.
+     */
     @Override
     public void close() {
         if (refreshTokenTask != null) {
@@ -172,22 +215,47 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
         }
     }
 
+    /**
+     * Returns the base URL of the Box application.
+     * @return the base URL
+     */
     public String getBaseUrl() {
         return baseUrl;
     }
 
+    /**
+     * Retrieves all enterprise users, optionally filtering by a term.
+     * @param filterTerm the term to filter users by (can be null)
+     * @param consumer a consumer to process each user info
+     */
     public void getUsers(final String filterTerm, final Consumer<BoxUser.Info> consumer) {
         BoxUser.getAllEnterpriseUsers(connection, filterTerm).forEach(consumer);
     }
 
+    /**
+     * Gets the root folder for the current user.
+     * @return the root folder
+     */
     public BoxFolder getRootFolder() {
         return BoxFolder.getRootFolder(connection);
     }
 
+    /**
+     * Gets a specific folder by its ID.
+     * @param folderId the ID of the folder
+     * @return the folder object
+     */
     public BoxFolder getFolder(final String folderId) {
         return new BoxFolder(connection, folderId);
     }
 
+    /**
+     * Recursively retrieves all files within a given folder and passes them to a consumer.
+     * @param folder the folder to start from
+     * @param userId the ID of the user to impersonate (can be null)
+     * @param fields the fields to retrieve for each item
+     * @param consumer a consumer to process each file
+     */
     public void getFiles(final BoxFolder folder, final String userId, final String[] fields, final Consumer<BoxFile> consumer) {
         if (logger.isDebugEnabled()) {
             logger.debug("Crawling folder {}", folder.getID());
@@ -246,13 +314,19 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
                 final BoxAPIConnection con = connection;
                 synchronized (boxConfig) {
                     if (con == connection) {
-                        createConnction();
+                        createConnection();
                     }
                 }
             }
         });
     }
 
+    /**
+     * Gets an input stream for the content of a given file.
+     * @param file the file to download
+     * @return an input stream for the file content
+     * @throws CrawlingAccessException if the download fails
+     */
     public InputStream getFileInputStream(final BoxFile file) {
         try (final DeferredFileOutputStream dfos =
                 new DeferredFileOutputStream((int) maxCachedContentSize, "crawler-BoxClient-", ".out", SystemUtils.getJavaIoTmpDir())) {
@@ -269,10 +343,17 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
         }
     }
 
+    /**
+     * Switches the API connection to act as the application's service account.
+     */
     public void asSelf() {
         connection.asSelf();
     }
 
+    /**
+     * Switches the API connection to act as a specific user.
+     * @param userId the ID of the user to impersonate
+     */
     public void asUser(final String userId) {
         connection.asUser(userId);
     }
