@@ -314,7 +314,7 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
                 final BoxAPIConnection con = connection;
                 synchronized (boxConfig) {
                     if (con == connection) {
-                        createConnction();
+                        createConnection();
                     }
                 }
             }
