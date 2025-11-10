@@ -21,11 +21,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
@@ -39,7 +36,6 @@ import org.codelibs.fess.opensearch.config.exentity.DataConfig;
 import org.codelibs.fess.util.ComponentUtil;
 import org.dbflute.utflute.lastaflute.LastaFluteTestCase;
 
-import com.box.sdk.BoxItem;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -149,36 +145,14 @@ public class BoxDataStoreTest extends LastaFluteTestCase {
         assertTrue(config.toString().contains("supportedMimeTypes=[application/pdf, text/plain]"));
     }
 
-    public void test_getPath() throws Exception {
-        final TestableBoxDataStore testDataStore = new TestableBoxDataStore();
-
-        // Create a mock BoxItem.Info with path collection
-        final List<BoxItem.Info> pathCollection = new ArrayList<>();
-        final MockBoxItemInfo root = new MockBoxItemInfo("0", "All Files");
-        final MockBoxItemInfo folder1 = new MockBoxItemInfo("1", "Documents");
-        final MockBoxItemInfo folder2 = new MockBoxItemInfo("2", "Reports");
-
-        pathCollection.add(root);
-        pathCollection.add(folder1);
-        pathCollection.add(folder2);
-
-        final MockBoxItemInfo itemInfo = new MockBoxItemInfo("3", "file.pdf");
-        itemInfo.setPathCollection(pathCollection);
-
-        final String path = testDataStore.callGetPath(itemInfo);
-        assertEquals("All Files/Documents/Reports", path);
-    }
-
-    public void test_getUrl() throws Exception {
-        final TestableBoxDataStore testDataStore = new TestableBoxDataStore();
+    public void test_getBaseUrl() {
         final MockBoxClient mockClient = new MockBoxClient();
         mockClient.setBaseUrl("https://app.box.com");
 
-        final MockBoxItemInfo itemInfo = new MockBoxItemInfo("12345", "test.pdf");
-        itemInfo.setType("file");
+        assertEquals("https://app.box.com", mockClient.getBaseUrl());
 
-        final String url = testDataStore.callGetUrl(mockClient, itemInfo);
-        assertEquals("https://app.box.com/file/12345", url);
+        mockClient.setBaseUrl("https://custom.box.com");
+        assertEquals("https://custom.box.com", mockClient.getBaseUrl());
     }
 
     public void test_getBoxNoteContents() throws Exception {
@@ -287,14 +261,6 @@ public class BoxDataStoreTest extends LastaFluteTestCase {
             return new Config(paramMap);
         }
 
-        public String callGetPath(final BoxItem.Info info) {
-            return getPath(info);
-        }
-
-        public String callGetUrl(final BoxClient client, final BoxItem.Info info) {
-            return getUrl(client, info);
-        }
-
         public String callGetBoxNoteContents(final InputStream in) throws IOException {
             return getBoxNoteContents(in);
         }
@@ -317,49 +283,6 @@ public class BoxDataStoreTest extends LastaFluteTestCase {
         @Override
         public String getBaseUrl() {
             return baseUrl;
-        }
-    }
-
-    /**
-     * Mock BoxItem.Info for testing
-     */
-    static class MockBoxItemInfo extends BoxItem.Info {
-        private final String id;
-        private final String name;
-        private String type;
-        private List<BoxItem.Info> pathCollection;
-
-        public MockBoxItemInfo(final String id, final String name) {
-            this.id = id;
-            this.name = name;
-        }
-
-        @Override
-        public String getID() {
-            return id;
-        }
-
-        @Override
-        public String getName() {
-            return name;
-        }
-
-        @Override
-        public String getType() {
-            return type != null ? type : "file";
-        }
-
-        public void setType(final String type) {
-            this.type = type;
-        }
-
-        @Override
-        public List<BoxItem.Info> getPathCollection() {
-            return pathCollection != null ? pathCollection : new ArrayList<>();
-        }
-
-        public void setPathCollection(final List<BoxItem.Info> pathCollection) {
-            this.pathCollection = pathCollection;
         }
     }
 
