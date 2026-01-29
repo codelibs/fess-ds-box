@@ -15,6 +15,8 @@
  */
 package org.codelibs.fess.ds.box;
 
+import org.junit.jupiter.api.TestInfo;
+
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
@@ -34,12 +36,12 @@ import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.helper.FileTypeHelper;
 import org.codelibs.fess.opensearch.config.exentity.DataConfig;
 import org.codelibs.fess.util.ComponentUtil;
-import org.dbflute.utflute.lastaflute.LastaFluteTestCase;
+import org.codelibs.fess.ds.box.UnitDsTestCase;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-public class BoxDataStoreTest extends LastaFluteTestCase {
+public class BoxDataStoreTest extends UnitDsTestCase {
 
     private static final Logger logger = LogManager.getLogger(BoxDataStoreTest.class);
 
@@ -56,15 +58,15 @@ public class BoxDataStoreTest extends LastaFluteTestCase {
     }
 
     @Override
-    public void setUp() throws Exception {
-        super.setUp();
+    public void setUp(TestInfo testInfo) throws Exception {
+        super.setUp(testInfo);
         dataStore = new BoxDataStore();
     }
 
     @Override
-    public void tearDown() throws Exception {
+    public void tearDown(TestInfo testInfo) throws Exception {
         ComponentUtil.setFessConfig(null);
-        super.tearDown();
+        super.tearDown(testInfo);
     }
 
     public void test_getName() {

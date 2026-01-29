@@ -15,13 +15,15 @@
  */
 package org.codelibs.fess.ds.box;
 
+import org.junit.jupiter.api.TestInfo;
+
 import java.util.HashMap;
 import java.util.Map;
 
 import org.codelibs.fess.exception.DataStoreException;
-import org.dbflute.utflute.lastaflute.LastaFluteTestCase;
+import org.codelibs.fess.ds.box.UnitDsTestCase;
 
-public class BoxClientTest extends LastaFluteTestCase {
+public class BoxClientTest extends UnitDsTestCase {
 
     @Override
     public String prepareConfigFile() {
