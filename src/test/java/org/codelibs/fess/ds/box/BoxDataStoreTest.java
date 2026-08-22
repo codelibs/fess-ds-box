@@ -179,6 +179,18 @@ public class BoxDataStoreTest extends UnitDsTestCase {
     }
 
     @Test
+    public void test_getBoxNoteContents_proseMirror() throws Exception {
+        final String json = """
+                {"doc":{"type":"doc","content":[
+                  {"type":"paragraph","content":[{"type":"text","text":"new format"}]}
+                ]}}
+                """;
+        try (InputStream in = new ByteArrayInputStream(json.getBytes(StandardCharsets.UTF_8))) {
+            assertEquals("new format", new TestableBoxDataStore().callGetBoxNoteContents(in));
+        }
+    }
+
+    @Test
     public void test_newFixedThreadPool() {
         final TestableBoxDataStore testDataStore = new TestableBoxDataStore();
         final java.util.concurrent.ExecutorService executor = testDataStore.callNewFixedThreadPool(4);

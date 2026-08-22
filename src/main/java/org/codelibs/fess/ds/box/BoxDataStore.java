@@ -63,8 +63,6 @@ import com.box.sdk.BoxFile;
 import com.box.sdk.BoxFolder;
 import com.box.sdk.BoxItem;
 import com.box.sdk.BoxUser;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
  * A data store implementation for crawling files and folders from Box.
@@ -477,9 +475,7 @@ public class BoxDataStore extends AbstractDataStore {
      * @throws IOException If an I/O error occurs.
      */
     protected String getBoxNoteContents(final InputStream in) throws IOException {
-        final ObjectMapper mapper = new ObjectMapper();
-        final JsonNode node = mapper.readTree(in);
-        return node.get("atext").get("text").asText();
+        return BoxNoteParser.parse(in);
     }
 
     /**
