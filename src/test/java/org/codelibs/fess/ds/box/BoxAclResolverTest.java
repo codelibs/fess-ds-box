@@ -23,6 +23,8 @@ import org.junit.jupiter.api.Test;
 
 import com.box.sdk.BoxCollaboration;
 import com.box.sdk.BoxFile;
+import com.box.sdk.BoxFolder;
+import com.box.sdk.BoxItem;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -35,6 +37,19 @@ public class BoxAclResolverTest {
     /** Builds a {@link BoxFile.Info} from a raw JSON payload without any network access. */
     private static BoxFile.Info info(final String json) {
         return new BoxFile(null, "file-1").new Info(json);
+    }
+
+    /**
+     * Builds a {@link BoxFolder.Info} from a raw JSON payload without any network access.
+     *
+     * <p>{@code getID()} on the returned info reflects {@code id}, the underlying
+     * {@link BoxFolder}'s own id - not any {@code "id"} field inside {@code json}. Box's SDK
+     * ties an {@code Info}'s id to its resource, not to the JSON body used to populate it; only
+     * <em>nested</em> objects (e.g. {@code path_collection} entries), which the SDK parses by
+     * constructing a fresh resource per entry, pick their id up from JSON.</p>
+     */
+    private static BoxFolder.Info folderInfo(final String id, final String json) {
+        return new BoxFolder(null, id).new Info(json);
     }
 
     @Test
@@ -94,7 +109,7 @@ public class BoxAclResolverTest {
         }
 
         @Override
-        protected List<String> getOwnerRoles(final BoxFile.Info info) {
+        protected List<String> getOwnerRoles(final BoxItem.Info info) {
             return ownerRoles;
         }
 
@@ -283,7 +298,7 @@ public class BoxAclResolverTest {
     public void test_getRoles_mergesAllSourcesPreservingOrderAndDedupingAcrossThem() {
         final StubResolver resolver = new StubResolver(Map.of("100", List.of("folderuser", "shared")), List.of("defaultuser"), "shared") {
             @Override
-            protected List<String> getOwnerRoles(final BoxFile.Info info) {
+            protected List<String> getOwnerRoles(final BoxItem.Info info) {
                 return List.of("owneruser");
             }
 
@@ -299,5 +314,91 @@ public class BoxAclResolverTest {
         final List<String> roles = resolver.getRoles(null, info, List.of("baseuser"));
 
         assertEquals(List.of("baseuser", "defaultuser", "owneruser", "folderuser", "shared", "fileuser"), roles);
+    }
+
+    // --- getRoles(BoxClient, BoxFolder.Info, ...): a folder indexed as a document itself ---
+
+    @Test
+    public void test_getRoles_folder_ownCollaborationsIncluded() {
+        final StubResolver resolver = new StubResolver(Map.of("200", List.of("owncollaborator")), List.of(), null);
+        final BoxFolder.Info info = folderInfo("200", "{\"path_collection\":{\"total_count\":0,\"entries\":[]}}");
+
+        final List<String> roles = resolver.getRoles(null, info, List.of());
+
+        assertEquals(List.of("owncollaborator"), roles);
+    }
+
+    @Test
+    public void test_getRoles_folder_skipsRootFolderAncestor() {
+        final StubResolver resolver =
+                new StubResolver(Map.of("0", List.of("wronguser"), "100", List.of("gooduser"), "200", List.of()), List.of(), null);
+        final BoxFolder.Info info =
+                folderInfo("200", "{\"path_collection\":{\"total_count\":2,\"entries\":[{\"id\":\"0\"},{\"id\":\"100\"}]}}");
+
+        final List<String> roles = resolver.getRoles(null, info, List.of());
+
+        assertEquals(List.of("gooduser"), roles);
+        // "0" (ancestor) must never be looked up; "100" (ancestor) and "200" (the folder's own
+        // roles) are the only two real lookups.
+        assertEquals(2, resolver.folderLookups);
+    }
+
+    @Test
+    public void test_getRoles_folder_ownCollaborationLookupFailure_setsAclDegraded() {
+        // Like test_getRoles_ancestorFolderCollaborationLookupFailure_setsAclDegraded, this must
+        // route through the real, unstubbed loadFolderRoles(client, folderId, quality) so its own
+        // try/catch actually runs for the folder's *own* lookup, not just its ancestors'.
+        final StubResolver resolver = new StubResolver(Map.of(), List.of(), null);
+        resolver.failFolderRoles = true;
+        final BoxClient client = new BoxClient() {
+            @Override
+            public Collection<BoxCollaboration.Info> getFolderCollaborations(final String folderId) {
+                throw new RuntimeException("simulated folder collaboration lookup failure");
+            }
+        };
+        final BoxFolder.Info info = folderInfo("200", "{\"path_collection\":{\"total_count\":0,\"entries\":[]}}");
+        final BoxDataStore.DocumentQuality quality = new BoxDataStore.DocumentQuality();
+
+        final List<String> roles = resolver.getRoles(client, info, List.of(), quality);
+
+        assertTrue(quality.aclDegraded, "a failed own-folder collaboration lookup must degrade the document");
+        assertEquals(List.of(), roles, "the failed folder contributes no roles");
+    }
+
+    @Test
+    public void test_getRoles_folder_mergesAllSourcesPreservingOrderAndDedupingAcrossThem() {
+        final StubResolver resolver =
+                new StubResolver(Map.of("100", List.of("folderuser", "shared"), "200", List.of("owncollaborator", "shared")),
+                        List.of("defaultuser"), "shared") {
+                    @Override
+                    protected List<String> getOwnerRoles(final BoxItem.Info info) {
+                        return List.of("owneruser");
+                    }
+                };
+        final BoxFolder.Info info = folderInfo("200", "{\"path_collection\":{\"total_count\":1,\"entries\":[{\"id\":\"100\"}]},"
+                + "\"shared_link\":{\"effective_access\":\"company\"}}");
+
+        final List<String> roles = resolver.getRoles(null, info, List.of("baseuser"));
+
+        assertEquals(List.of("baseuser", "defaultuser", "owneruser", "folderuser", "shared", "owncollaborator"), roles);
+    }
+
+    @Test
+    public void test_getRoles_folder_sharesFolderRoleCacheWithDescendantFileAncestorLookup() {
+        // The brief's central claim: indexing a folder costs at most one lookup that a
+        // descendant file's ancestor-role resolution would have made anyway. Prove the cache is
+        // the same one, regardless of which of the two call sites (folder-as-document, or
+        // file-as-ancestor) reaches folder "100" first.
+        final StubResolver resolver = new StubResolver(Map.of("100", List.of("shareduser")), List.of(), null);
+        final BoxFolder.Info folder = folderInfo("100", "{\"path_collection\":{\"total_count\":0,\"entries\":[]}}");
+        final BoxFile.Info file =
+                info("{\"has_collaborations\":false,\"path_collection\":{\"total_count\":1,\"entries\":[{\"id\":\"100\"}]}}");
+
+        final List<String> folderRoles = resolver.getRoles(null, folder, List.of());
+        final List<String> fileRoles = resolver.getRoles(null, file, List.of());
+
+        assertTrue(folderRoles.contains("shareduser"));
+        assertTrue(fileRoles.contains("shareduser"));
+        assertEquals(1, resolver.folderLookups, "the second call must hit the cache, not read folder 100 again");
     }
 }

@@ -108,6 +108,20 @@ public class BoxDataStore extends AbstractDataStore {
     protected static final long DEFAULT_AWAIT_TIMEOUT = 60L;
     /** Parameter key for a term to filter users by. */
     protected static final String FILTER_TERM = "filter_term";
+    /**
+     * Parameter key to crawl a single folder as the service account instead of enumerating and
+     * impersonating every enterprise user.
+     *
+     * <p>Named {@code ROOT_FOLDER_ID_PARAM}, not {@code ROOT_FOLDER_ID}, to avoid colliding with
+     * {@link BoxAclResolver#ROOT_FOLDER_ID}: that constant is the literal Box id {@code "0"} of a
+     * user's own "All Files" root, a different concept from this parameter's value, which is the
+     * id of an arbitrary folder an operator chooses to crawl.</p>
+     *
+     * <p>This is not a user-impersonation path: the folder is walked, and its ACLs resolved,
+     * entirely as the service account. The service account therefore needs its own access to the
+     * folder - typically by being added as a collaborator - or the crawl will see nothing.</p>
+     */
+    protected static final String ROOT_FOLDER_ID_PARAM = "root_folder_id";
     /** Parameter key for roles applied to every document. */
     protected static final String DEFAULT_PERMISSIONS = "default_permissions";
     /** Parameter key for the role granted to enterprise-wide shared links. */
@@ -125,6 +139,26 @@ public class BoxDataStore extends AbstractDataStore {
                     "purged_at", "content_created_at", "content_modified_at", "created_by", "modified_by", "owned_by", "shared_link",
                     "parent", "item_status", "sequence_id", "file_version", "version_number", "comment_count", "permissions", "tags",
                     "lock", "extension", "is_package", "has_collaborations", "watermark_info", "collections", "representations" };
+
+    /**
+     * Fields requested from the Box API when fetching a single folder's own info
+     * ({@code buildFolderMap}'s {@code folder.getInfo(...)} call).
+     *
+     * <p>Deliberately not {@link #DEFAULT_FIELDS}: that list includes file-only names -
+     * {@code sha1}, {@code file_version}, {@code version_number}, {@code comment_count},
+     * {@code lock}, {@code extension}, {@code is_package}, {@code representations} - that a
+     * folder object does not have. {@code getChildren(fields)} tolerating {@link #DEFAULT_FIELDS}
+     * (it must, since a single traversal call lists both files and folders together) is not
+     * evidence that a single-folder {@code GET /folders/{id}} tolerates the same list; nothing in
+     * this plugin has been run against a live tenant to settle that question, so this list keeps
+     * only the names a folder is documented to have, including the four the ACL resolver needs:
+     * {@code has_collaborations}, {@code path_collection}, {@code owned_by} and
+     * {@code shared_link}.</p>
+     */
+    protected static final String[] DEFAULT_FOLDER_FIELDS =
+            { "type", "id", "etag", "name", "description", "size", "path_collection", "created_at", "modified_at", "trashed_at",
+                    "purged_at", "content_created_at", "content_modified_at", "created_by", "modified_by", "owned_by", "shared_link",
+                    "parent", "item_status", "sequence_id", "permissions", "tags", "has_collaborations", "watermark_info", "collections" };
 
     /**
      * Parameter keys that must never reach the script evaluation context.
@@ -248,7 +282,12 @@ public class BoxDataStore extends AbstractDataStore {
         }
 
         try (final BoxClient client = createClient(paramMap)) {
-            crawlUserFolders(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, client);
+            final String rootFolderId = paramMap.getAsString(ROOT_FOLDER_ID_PARAM, StringUtil.EMPTY).trim();
+            if (StringUtil.isNotBlank(rootFolderId)) {
+                crawlRootFolder(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, client, rootFolderId);
+            } else {
+                crawlUserFolders(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, client);
+            }
         }
     }
 
@@ -294,44 +333,152 @@ public class BoxDataStore extends AbstractDataStore {
                 // connection while a previous user's worker threads could still be running,
                 // risking a request issued under the wrong identity.
                 final BoxClient userClient = client.forUser(userId);
-                final BoxFolder folder = userClient.getRootFolder();
-                userClient.getFiles(folder, config.fields, file -> {
-                    if (!alive) {
-                        return;
-                    }
-                    if (!markCrawled(crawledIds, file.getID())) {
-                        if (logger.isDebugEnabled()) {
-                            logger.debug("{} was already crawled via another user.", file.getID());
-                        }
-                        return;
-                    }
-                    executorService.execute(() -> storeFile(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, userClient,
-                            aclResolver, crawledIds, file));
-                    if (readInterval > 0) {
-                        sleep(readInterval);
-                    }
-                });
+                crawlFolder(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, userClient, userClient.getRootFolder(),
+                        aclResolver, crawledIds, executorService, readInterval);
             });
         } finally {
-            if (logger.isDebugEnabled()) {
-                logger.debug("shutting down executor..");
+            shutdownAndAwait(executorService, config.awaitTimeout);
+        }
+    }
+
+    /**
+     * Crawls a single folder as the service account, without enumerating any users.
+     *
+     * <p>Used when {@code root_folder_id} is set. The walk goes through {@link #crawlFolder}
+     * just like the per-user walk does, so it shares the single executor, the dedup set and the
+     * {@code alive} checks with {@link #crawlUserFolders} - this is not a second, simpler crawl
+     * loop. {@code client} is the service-account client {@link #createClient} returned; it is
+     * never impersonated here, so its ACL resolution naturally happens as the service account,
+     * per {@link BoxAclResolver}'s contract.</p>
+     *
+     * @param dataConfig The data configuration.
+     * @param callback The callback to index documents.
+     * @param config The data store configuration.
+     * @param paramMap The data store parameters.
+     * @param scriptMap The script mapping.
+     * @param defaultDataMap The default data map.
+     * @param client The service-account Box client.
+     * @param rootFolderId The id of the folder to crawl.
+     */
+    protected void crawlRootFolder(final DataConfig dataConfig, final IndexUpdateCallback callback, final Config config,
+            final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
+            final BoxClient client, final String rootFolderId) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("crawling folder {} as the service account.", rootFolderId);
+        }
+        final long readInterval = getReadInterval(paramMap);
+        final BoxAclResolver aclResolver = new BoxAclResolver(config.defaultPermissions, config.companySharedLinkRole);
+        final ExecutorService executorService = newFixedThreadPool(getNumberOfThreads(paramMap));
+        final Set<String> crawledIds = ConcurrentHashMap.newKeySet();
+        try {
+            crawlFolder(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, client, client.getFolder(rootFolderId),
+                    aclResolver, crawledIds, executorService, readInterval);
+        } finally {
+            shutdownAndAwait(executorService, config.awaitTimeout);
+        }
+    }
+
+    /**
+     * Walks one folder tree with one client, queuing every file - and, unless
+     * {@code config.ignoreFolder} is set, every descendant folder too - for storage exactly
+     * once. Shared by {@link #crawlUserFolders} (once per user) and {@link #crawlRootFolder}
+     * (once, as the service account), so both paths apply the same dedup claim, {@code alive}
+     * check and executor.
+     *
+     * @param dataConfig The data configuration.
+     * @param callback The callback to index documents.
+     * @param config The data store configuration.
+     * @param paramMap The data store parameters.
+     * @param scriptMap The script mapping.
+     * @param defaultDataMap The default data map.
+     * @param client The Box client to walk the folder with.
+     * @param rootFolder The folder to start from.
+     * @param aclResolver The resolver used to compute search roles.
+     * @param crawledIds The set of item IDs already successfully crawled in this crawl session.
+     * @param executorService The executor files and folders are queued on.
+     * @param readInterval The delay, in milliseconds, applied after queuing each item; 0 disables it.
+     */
+    protected void crawlFolder(final DataConfig dataConfig, final IndexUpdateCallback callback, final Config config,
+            final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
+            final BoxClient client, final BoxFolder rootFolder, final BoxAclResolver aclResolver, final Set<String> crawledIds,
+            final ExecutorService executorService, final long readInterval) {
+        client.getFiles(rootFolder, config.fields, file -> {
+            if (!alive) {
+                return;
             }
-            executorService.shutdown();
-            try {
-                if (!executorService.awaitTermination(config.awaitTimeout, TimeUnit.SECONDS)) {
-                    // shutdownNow() only returns tasks that never started; it does not count
-                    // files whose storeFile() task was already running and got interrupted, so
-                    // this understates how many files were actually disrupted.
-                    final List<Runnable> pending = executorService.shutdownNow();
-                    logger.warn(
-                            "The crawler did not finish within {} seconds. {} queued-but-unstarted file(s) were dropped, and any "
-                                    + "file(s) still being processed were interrupted. Increase {} if this happens regularly.",
-                            config.awaitTimeout, pending.size(), THREAD_POOL_AWAIT_TIMEOUT);
+            if (!markCrawled(crawledIds, itemKey(BoxClient.ITEM_TYPE_FILE, file.getID()))) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("{} was already crawled.", file.getID());
                 }
-            } catch (final InterruptedException e) {
-                executorService.shutdownNow();
-                throw new InterruptedRuntimeException(e);
+                return;
             }
+            executorService.execute(() -> storeFile(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, client, aclResolver,
+                    crawledIds, file));
+            if (readInterval > 0) {
+                sleep(readInterval);
+            }
+        }, config.ignoreFolder ? null : folder -> {
+            if (!alive) {
+                return;
+            }
+            if (!markCrawled(crawledIds, itemKey(BoxClient.ITEM_TYPE_FOLDER, folder.getID()))) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("{} was already crawled.", folder.getID());
+                }
+                return;
+            }
+            executorService.execute(() -> storeFolder(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, client,
+                    aclResolver, crawledIds, folder));
+            if (readInterval > 0) {
+                sleep(readInterval);
+            }
+        });
+    }
+
+    /**
+     * Builds the dedup-claim key the {@code crawledIds} set uses, namespaced by item type.
+     *
+     * <p>Box does not document that file ids and folder ids are drawn from disjoint spaces -
+     * {@link #getUrl} and {@link BoxAclResolver}'s javadoc both treat "unique id" claims as
+     * scoped to one item type, never across types. Keying the shared dedup set on the bare id
+     * alone would let a file and a folder that happen to share a numeric id compete for the same
+     * claim; whichever lost would be silently dropped with only a debug log line, no warning, no
+     * failure URL, and no stats discard.</p>
+     *
+     * @param type the item type, {@link BoxClient#ITEM_TYPE_FILE} or {@link BoxClient#ITEM_TYPE_FOLDER}
+     * @param id the item's own id
+     * @return the namespaced key
+     */
+    protected static String itemKey(final String type, final String id) {
+        return type + ":" + id;
+    }
+
+    /**
+     * Shuts down an executor and waits for it to finish, force-shutting-down and logging if it
+     * does not finish within {@code awaitTimeoutSeconds}.
+     *
+     * @param executorService the executor to shut down
+     * @param awaitTimeoutSeconds how long to wait for queued work to finish
+     */
+    protected void shutdownAndAwait(final ExecutorService executorService, final long awaitTimeoutSeconds) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("shutting down executor..");
+        }
+        executorService.shutdown();
+        try {
+            if (!executorService.awaitTermination(awaitTimeoutSeconds, TimeUnit.SECONDS)) {
+                // shutdownNow() only returns tasks that never started; it does not count
+                // items whose store*() task was already running and got interrupted, so this
+                // understates how many items were actually disrupted.
+                final List<Runnable> pending = executorService.shutdownNow();
+                logger.warn(
+                        "The crawler did not finish within {} seconds. {} queued-but-unstarted item(s) were dropped, and any "
+                                + "item(s) still being processed were interrupted. Increase {} if this happens regularly.",
+                        awaitTimeoutSeconds, pending.size(), THREAD_POOL_AWAIT_TIMEOUT);
+            }
+        } catch (final InterruptedException e) {
+            executorService.shutdownNow();
+            throw new InterruptedRuntimeException(e);
         }
     }
 
@@ -375,129 +522,58 @@ public class BoxDataStore extends AbstractDataStore {
     }
 
     /**
-     * Stores a single file in the index.
+     * Builds a data map for a single item (file or folder), given the per-call stats and
+     * degradation-tracking objects it needs to record a discard or degraded quality with.
+     *
+     * <p>Returning {@code null} means the item was deliberately skipped - the reason has
+     * already been logged, and recorded via {@code crawlerStatsHelper} where applicable - and
+     * {@link #storeItem} must stop without indexing anything.</p>
+     */
+    @FunctionalInterface
+    protected interface ItemMapBuilder {
+        /**
+         * Builds the item's data map.
+         *
+         * @param crawlerStatsHelper the stats helper, for recording a discard
+         * @param statsKey the stats key for this item
+         * @param quality tracks whether content or roles were degraded rather than fully resolved
+         * @return the item's data map, or {@code null} if it was skipped
+         */
+        Map<String, Object> build(CrawlerStatsHelper crawlerStatsHelper, StatsKeyObject statsKey, DocumentQuality quality);
+    }
+
+    /**
+     * Runs the storage pipeline shared by files and folders: stats tracking, the
+     * {@code defaultDataMap} merge, script evaluation, the {@code callback.store} call, and
+     * failure/degradation handling including the dedup-claim release. {@code mapBuilder}
+     * supplies only what differs between a file and a folder - the fields themselves and any
+     * item-type-specific skip conditions.
      *
      * @param dataConfig The data configuration.
      * @param callback The callback to index documents.
-     * @param config The data store configuration.
      * @param paramMap The data store parameters.
      * @param scriptMap The script mapping.
      * @param defaultDataMap The default data map.
-     * @param client The Box client scoped to the file's user, from {@link BoxClient#forUser(String)}.
-     * @param aclResolver The resolver used to compute the file's search roles.
-     * @param crawledIds The set of file IDs already successfully crawled in this crawl session.
-     * @param file The Box file to store.
+     * @param crawledIds The set of item IDs already successfully crawled in this crawl session.
+     * @param itemId The id of the item being stored, used as the stats key and dedup claim.
+     * @param mapBuilder Builds the item's data map, or signals a skip by returning {@code null}.
      */
-    protected void storeFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final Config config,
-            final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
-            final BoxClient client, final BoxAclResolver aclResolver, final Set<String> crawledIds, final BoxFile file) {
+    protected void storeItem(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
+            final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap, final Set<String> crawledIds,
+            final String itemId, final ItemMapBuilder mapBuilder) {
         final CrawlerStatsHelper crawlerStatsHelper = ComponentUtil.getCrawlerStatsHelper();
         final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
-        final StatsKeyObject statsKey = new StatsKeyObject(file.getID());
+        final StatsKeyObject statsKey = new StatsKeyObject(itemId);
         paramMap.put(Constants.CRAWLER_STATS_KEY, statsKey);
         final DocumentQuality quality = new DocumentQuality();
         try {
             crawlerStatsHelper.begin(statsKey);
-            final BoxFile.Info info = file.getInfo(config.fields);
-            final String downloadURL = file.getDownloadURL().toExternalForm();
-            if (logger.isDebugEnabled()) {
-                logger.debug("downloadURL: {}", downloadURL);
-                logger.debug("info: {}", info.getJson());
-            }
-            final String mimeType = getFileMimeType(info);
-            if (Stream.of(config.supportedMimeTypes).noneMatch(mimeType::matches)) {
-                // application/octet-stream is the fallback when MimeTypeHelperImpl cannot
-                // determine the MIME type from the filename or content
-                if ("application/octet-stream".equals(mimeType)) {
-                    logger.warn(
-                            "The MIME type of {} could not be determined from its name, so it was "
-                                    + "treated as {} and did not match supported_mimetypes. The file was not indexed.",
-                            info.getName(), mimeType);
-                } else if (logger.isDebugEnabled()) {
-                    logger.debug("{} is not an indexing target.", mimeType);
-                }
-                crawlerStatsHelper.discard(statsKey);
+            final Map<String, Object> fileMap = mapBuilder.build(crawlerStatsHelper, statsKey, quality);
+            if (fileMap == null) {
                 return;
             }
-
-            final String path = getPath(info);
-            if (logger.isDebugEnabled()) {
-                logger.debug("path: {}", path);
-            }
-            final UrlFilter urlFilter = config.urlFilter;
-            if (urlFilter != null && !urlFilter.match(path)) {
-                if (logger.isDebugEnabled()) {
-                    logger.debug("Not matched: {}", path);
-                }
-                return;
-            }
-
-            final String url = getUrl(client, info);
-            logger.info("Crawling URL: {}", url);
 
             final Map<String, Object> resultMap = createResultMap(paramMap);
-            final Map<String, Object> fileMap = new HashMap<>();
-
-            if (info.getSize() > config.maxSize) {
-                // Over max_size is a deliberate skip, not a crawling error, so it must not
-                // be reported through failureUrl: that would pollute the failure log with
-                // files nobody asked to have indexed in the first place.
-                logger.info("Skipping {} because its size ({} byte) is over {} ({} byte).", info.getName(), info.getSize(), MAX_SIZE,
-                        config.maxSize);
-                crawlerStatsHelper.discard(statsKey);
-                return;
-            }
-
-            final String fileType = ComponentUtil.getFileTypeHelper().get(mimeType);
-
-            fileMap.put(FILE_URL, url);
-            fileMap.put(FILE_CONTENTS, getFileContents(client, file, info, downloadURL, mimeType, config.ignoreError, quality));
-            fileMap.put(FILE_MIMETYPE, mimeType);
-            fileMap.put(FILE_FILETYPE, fileType);
-            fileMap.put(FILE_DOWNLOAD_URL, downloadURL);
-            fileMap.put(FILE_TYPE, info.getType());
-            fileMap.put(FILE_ID, info.getID());
-            fileMap.put(FILE_FILE_VERSION, info.getVersion());
-            fileMap.put(FILE_SEQUENCE_ID, info.getSequenceID());
-            fileMap.put(FILE_ETAG, info.getEtag());
-            fileMap.put(FILE_SHA1, info.getSha1());
-            fileMap.put(FILE_NAME, info.getName());
-            fileMap.put(FILE_DESCRIPTION, info.getDescription());
-            fileMap.put(FILE_SIZE, info.getSize());
-            fileMap.put(FILE_PATH_COLLECTION, info.getPathCollection());
-            fileMap.put(FILE_CREATED_AT, info.getCreatedAt());
-            fileMap.put(FILE_MODIFIED_AT, info.getModifiedAt());
-            fileMap.put(FILE_TRASHED_AT, info.getTrashedAt());
-            fileMap.put(FILE_PURGED_AT, info.getPurgedAt());
-            fileMap.put(FILE_CONTENT_CREATED_AT, info.getContentCreatedAt());
-            fileMap.put(FILE_CONTENT_MODIFIED_AT, info.getContentModifiedAt());
-            fileMap.put(FILE_CREATED_BY, info.getCreatedBy());
-            fileMap.put(FILE_MODIFIED_BY, info.getModifiedBy());
-            fileMap.put(FILE_OWNED_BY, info.getOwnedBy());
-            fileMap.put(FILE_SHARED_LINK, info.getSharedLink());
-            fileMap.put(FILE_PARENT, info.getParent());
-            fileMap.put(FILE_ITEM_STATUS, info.getItemStatus());
-            fileMap.put(FILE_VERSION_NUMBER, info.getVersionNumber());
-            fileMap.put(FILE_COMMENT_COUNT, info.getCommentCount());
-            fileMap.put(FILE_PERMISSIONS, info.getPermissions());
-            fileMap.put(FILE_TAGS, info.getTags());
-            fileMap.put(FILE_LOCK, info.getLock());
-            fileMap.put(FILE_EXTENSION, info.getExtension());
-            fileMap.put(FILE_IS_PACKAGE, info.getIsPackage());
-
-            fileMap.put(FILE_IS_WATERMARK, info.getIsWatermarked());
-            // fileMap.put(FILE_METADATA, file.getMetadata());
-            fileMap.put(FILE_COLLECTIONS, info.getCollections());
-            fileMap.put(FILE_REPRESENTATIONS, info.getRepresentations());
-
-            final List<String> baseRoles = new ArrayList<>();
-            if (defaultDataMap.get(ComponentUtil.getFessConfig().getIndexFieldRole()) instanceof final List<?> roleTypeList) {
-                roleTypeList.stream().map(String.class::cast).forEach(baseRoles::add);
-            }
-            fileMap.put(FILE_ROLES, aclResolver.getRoles(client, info, baseRoles, quality));
-
-            fileMap.put("api", new BoxFileAPI(file));
-
             resultMap.put(FILE, fileMap);
 
             crawlerStatsHelper.record(statsKey, StatsAction.PREPARED);
@@ -527,10 +603,10 @@ public class BoxDataStore extends AbstractDataStore {
             callback.store(paramMap, dataMap);
             crawlerStatsHelper.record(statsKey, StatsAction.FINISHED);
             if (quality.isDegraded()) {
-                releaseCrawled(crawledIds, file.getID());
+                releaseCrawled(crawledIds, itemId);
             }
         } catch (final CrawlingAccessException e) {
-            releaseCrawled(crawledIds, file.getID());
+            releaseCrawled(crawledIds, itemId);
             logger.warn("Crawling Access Exception at : {}", dataMap, e);
 
             Throwable target = e;
@@ -553,7 +629,7 @@ public class BoxDataStore extends AbstractDataStore {
             failureUrlService.store(dataConfig, errorName, "", target);
             crawlerStatsHelper.record(statsKey, StatsAction.ACCESS_EXCEPTION);
         } catch (final Throwable t) {
-            releaseCrawled(crawledIds, file.getID());
+            releaseCrawled(crawledIds, itemId);
             logger.warn("Crawling Access Exception at : {}", dataMap, t);
             final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
             failureUrlService.store(dataConfig, t.getClass().getCanonicalName(), "", t);
@@ -561,6 +637,268 @@ public class BoxDataStore extends AbstractDataStore {
         } finally {
             crawlerStatsHelper.done(statsKey);
         }
+    }
+
+    /**
+     * Stores a single file in the index.
+     *
+     * @param dataConfig The data configuration.
+     * @param callback The callback to index documents.
+     * @param config The data store configuration.
+     * @param paramMap The data store parameters.
+     * @param scriptMap The script mapping.
+     * @param defaultDataMap The default data map.
+     * @param client The Box client scoped to the file's user, from {@link BoxClient#forUser(String)}.
+     * @param aclResolver The resolver used to compute the file's search roles.
+     * @param crawledIds The set of file IDs already successfully crawled in this crawl session.
+     * @param file The Box file to store.
+     */
+    protected void storeFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final Config config,
+            final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
+            final BoxClient client, final BoxAclResolver aclResolver, final Set<String> crawledIds, final BoxFile file) {
+        storeItem(dataConfig, callback, paramMap, scriptMap, defaultDataMap, crawledIds, itemKey(BoxClient.ITEM_TYPE_FILE, file.getID()),
+                (crawlerStatsHelper, statsKey, quality) -> buildFileMap(config, client, aclResolver, defaultDataMap, crawlerStatsHelper,
+                        statsKey, quality, file));
+    }
+
+    /**
+     * Builds a file's data map: content, metadata and roles.
+     *
+     * @param config The data store configuration.
+     * @param client The Box client scoped to the file's user, from {@link BoxClient#forUser(String)}.
+     * @param aclResolver The resolver used to compute the file's search roles.
+     * @param defaultDataMap The default data map, consulted for the base search roles.
+     * @param crawlerStatsHelper The stats helper, used to record a discard.
+     * @param statsKey The stats key for this file.
+     * @param quality Tracks whether content or roles were degraded rather than fully resolved.
+     * @param file The Box file to build the map for.
+     * @return the file's data map, or {@code null} if it was skipped (unsupported MIME type,
+     *         over {@code max_size}, or filtered out by include/exclude patterns - the skip is
+     *         logged, and for the first two also recorded as a discard, before returning)
+     */
+    protected Map<String, Object> buildFileMap(final Config config, final BoxClient client, final BoxAclResolver aclResolver,
+            final Map<String, Object> defaultDataMap, final CrawlerStatsHelper crawlerStatsHelper, final StatsKeyObject statsKey,
+            final DocumentQuality quality, final BoxFile file) {
+        final BoxFile.Info info = file.getInfo(config.fields);
+        final String downloadURL = file.getDownloadURL().toExternalForm();
+        if (logger.isDebugEnabled()) {
+            logger.debug("downloadURL: {}", downloadURL);
+            logger.debug("info: {}", info.getJson());
+        }
+        final String mimeType = getFileMimeType(info);
+        if (Stream.of(config.supportedMimeTypes).noneMatch(mimeType::matches)) {
+            // application/octet-stream is the fallback when MimeTypeHelperImpl cannot
+            // determine the MIME type from the filename or content
+            if ("application/octet-stream".equals(mimeType)) {
+                logger.warn(
+                        "The MIME type of {} could not be determined from its name, so it was "
+                                + "treated as {} and did not match supported_mimetypes. The file was not indexed.",
+                        info.getName(), mimeType);
+            } else if (logger.isDebugEnabled()) {
+                logger.debug("{} is not an indexing target.", mimeType);
+            }
+            crawlerStatsHelper.discard(statsKey);
+            return null;
+        }
+
+        final String path = getPath(info);
+        if (logger.isDebugEnabled()) {
+            logger.debug("path: {}", path);
+        }
+        if (!matchesUrlFilter(config.urlFilter, path)) {
+            return null;
+        }
+
+        final String url = getUrl(client, info);
+        logger.info("Crawling URL: {}", url);
+
+        final Map<String, Object> fileMap = new HashMap<>();
+
+        if (info.getSize() > config.maxSize) {
+            // Over max_size is a deliberate skip, not a crawling error, so it must not
+            // be reported through failureUrl: that would pollute the failure log with
+            // files nobody asked to have indexed in the first place.
+            logger.info("Skipping {} because its size ({} byte) is over {} ({} byte).", info.getName(), info.getSize(), MAX_SIZE,
+                    config.maxSize);
+            crawlerStatsHelper.discard(statsKey);
+            return null;
+        }
+
+        final String fileType = ComponentUtil.getFileTypeHelper().get(mimeType);
+
+        fileMap.put(FILE_URL, url);
+        fileMap.put(FILE_CONTENTS, getFileContents(client, file, info, downloadURL, mimeType, config.ignoreError, quality));
+        fileMap.put(FILE_MIMETYPE, mimeType);
+        fileMap.put(FILE_FILETYPE, fileType);
+        fileMap.put(FILE_DOWNLOAD_URL, downloadURL);
+        putCommonItemFields(fileMap, info);
+        fileMap.put(FILE_FILE_VERSION, info.getVersion());
+        fileMap.put(FILE_SHA1, info.getSha1());
+        fileMap.put(FILE_SIZE, info.getSize());
+        fileMap.put(FILE_VERSION_NUMBER, info.getVersionNumber());
+        fileMap.put(FILE_COMMENT_COUNT, info.getCommentCount());
+        fileMap.put(FILE_PERMISSIONS, info.getPermissions());
+        fileMap.put(FILE_LOCK, info.getLock());
+        fileMap.put(FILE_EXTENSION, info.getExtension());
+        fileMap.put(FILE_IS_PACKAGE, info.getIsPackage());
+        fileMap.put(FILE_IS_WATERMARK, info.getIsWatermarked());
+        // fileMap.put(FILE_METADATA, file.getMetadata());
+        fileMap.put(FILE_REPRESENTATIONS, info.getRepresentations());
+
+        fileMap.put(FILE_ROLES, aclResolver.getRoles(client, info, getBaseRoles(defaultDataMap), quality));
+
+        fileMap.put("api", new BoxFileAPI(file));
+
+        return fileMap;
+    }
+
+    /**
+     * Stores a single folder in the index. Only reached when {@code ignore_folder} is false.
+     *
+     * @param dataConfig The data configuration.
+     * @param callback The callback to index documents.
+     * @param config The data store configuration.
+     * @param paramMap The data store parameters.
+     * @param scriptMap The script mapping.
+     * @param defaultDataMap The default data map.
+     * @param client The Box client scoped to the folder's user, from {@link BoxClient#forUser(String)},
+     *        or the service-account client when crawling via {@code root_folder_id}.
+     * @param aclResolver The resolver used to compute the folder's search roles.
+     * @param crawledIds The set of item IDs already successfully crawled in this crawl session.
+     * @param folder The Box folder to store.
+     */
+    protected void storeFolder(final DataConfig dataConfig, final IndexUpdateCallback callback, final Config config,
+            final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
+            final BoxClient client, final BoxAclResolver aclResolver, final Set<String> crawledIds, final BoxFolder folder) {
+        storeItem(dataConfig, callback, paramMap, scriptMap, defaultDataMap, crawledIds,
+                itemKey(BoxClient.ITEM_TYPE_FOLDER, folder.getID()),
+                (crawlerStatsHelper, statsKey, quality) -> buildFolderMap(config, client, aclResolver, defaultDataMap, quality, folder));
+    }
+
+    /**
+     * Builds a folder's data map: metadata and roles.
+     *
+     * <p>Unlike a file, a folder has no content, size, sha1 or download URL, and its URL uses
+     * {@code /folder/} rather than {@code /file/} - {@link #getUrl} already produces the right
+     * shape because it reads it from {@code info.getType()}. A folder is never subject to
+     * {@code max_size} or {@code supported_mimetypes}: neither concept applies to it.</p>
+     *
+     * @param config The data store configuration.
+     * @param client The Box client to resolve the folder's roles with.
+     * @param aclResolver The resolver used to compute the folder's search roles.
+     * @param defaultDataMap The default data map, consulted for the base search roles.
+     * @param quality Tracks whether roles were degraded rather than fully resolved.
+     * @param folder The Box folder to build the map for.
+     * @return the folder's data map, or {@code null} if it was filtered out by include/exclude
+     *         patterns (the skip is logged before returning)
+     */
+    protected Map<String, Object> buildFolderMap(final Config config, final BoxClient client, final BoxAclResolver aclResolver,
+            final Map<String, Object> defaultDataMap, final DocumentQuality quality, final BoxFolder folder) {
+        // Deliberately not config.fields: getChildren(fields) tolerating the file-heavy
+        // DEFAULT_FIELDS list is weak evidence that a single-folder GET /folders/{id} does too -
+        // getChildren legitimately spans both item types, a single-folder fetch does not.
+        final BoxFolder.Info info = folder.getInfo(DEFAULT_FOLDER_FIELDS);
+        if (logger.isDebugEnabled()) {
+            logger.debug("info: {}", info.getJson());
+        }
+
+        final String path = getPath(info);
+        if (logger.isDebugEnabled()) {
+            logger.debug("path: {}", path);
+        }
+        if (!matchesUrlFilter(config.urlFilter, path)) {
+            return null;
+        }
+
+        final String url = getUrl(client, info);
+        logger.info("Crawling URL: {}", url);
+
+        final Map<String, Object> fileMap = new HashMap<>();
+        fileMap.put(FILE_URL, url);
+        fileMap.put(FILE_CONTENTS, StringUtil.EMPTY);
+        putCommonItemFields(fileMap, info);
+        fileMap.put(FILE_PERMISSIONS, info.getPermissions());
+        fileMap.put(FILE_IS_WATERMARK, info.getIsWatermarked());
+
+        fileMap.put(FILE_ROLES, aclResolver.getRoles(client, info, getBaseRoles(defaultDataMap), quality));
+
+        return fileMap;
+    }
+
+    /**
+     * Checks a path against the configured include/exclude patterns, logging a debug line on a
+     * miss.
+     *
+     * @param urlFilter the filter, or {@code null} if none is configured
+     * @param path the path to check, from {@link #getPath}
+     * @return true if the path is not filtered out
+     */
+    protected boolean matchesUrlFilter(final UrlFilter urlFilter, final String path) {
+        if (urlFilter != null && !urlFilter.match(path)) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("Not matched: {}", path);
+            }
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Extracts the base search roles {@code defaultDataMap} carries under the role field, if
+     * any. Shared by {@link #buildFileMap} and {@link #buildFolderMap} so a file and a folder
+     * from the same crawl start their role resolution from the same base.
+     *
+     * @param defaultDataMap the default data map
+     * @return the base roles, or an empty list if none were present
+     */
+    private List<String> getBaseRoles(final Map<String, Object> defaultDataMap) {
+        final List<String> baseRoles = new ArrayList<>();
+        if (defaultDataMap.get(ComponentUtil.getFessConfig().getIndexFieldRole()) instanceof final List<?> roleTypeList) {
+            roleTypeList.stream().map(String.class::cast).forEach(baseRoles::add);
+        }
+        return baseRoles;
+    }
+
+    /**
+     * Populates the fields a file and a folder document share, reading them through the
+     * accessors {@link BoxItem.Info} - the common supertype of {@link BoxFile.Info} and
+     * {@link BoxFolder.Info} - actually declares. Sharing this means a field common to both item
+     * types is set in exactly one place, instead of {@link #buildFileMap} and
+     * {@link #buildFolderMap} independently repeating (and risking drifting on) the same 20-odd
+     * {@code fileMap.put} calls.
+     *
+     * <p>{@code permissions} and {@code is_watermark} are deliberately not here: {@code
+     * BoxFile.Info} and {@code BoxFolder.Info} each declare their own {@code getPermissions()}/
+     * {@code getIsWatermarked()}, with unrelated return types ({@code EnumSet<BoxFile.Permission>}
+     * vs. {@code EnumSet<BoxFolder.Permission>}). Neither is declared on the common
+     * {@code BoxItem.Info} supertype, so neither can be read through a reference typed as one -
+     * each caller must still set them itself.</p>
+     *
+     * @param fileMap the map to populate
+     * @param info the item information
+     */
+    private void putCommonItemFields(final Map<String, Object> fileMap, final BoxItem.Info info) {
+        fileMap.put(FILE_TYPE, info.getType());
+        fileMap.put(FILE_ID, info.getID());
+        fileMap.put(FILE_SEQUENCE_ID, info.getSequenceID());
+        fileMap.put(FILE_ETAG, info.getEtag());
+        fileMap.put(FILE_NAME, info.getName());
+        fileMap.put(FILE_DESCRIPTION, info.getDescription());
+        fileMap.put(FILE_PATH_COLLECTION, info.getPathCollection());
+        fileMap.put(FILE_CREATED_AT, info.getCreatedAt());
+        fileMap.put(FILE_MODIFIED_AT, info.getModifiedAt());
+        fileMap.put(FILE_TRASHED_AT, info.getTrashedAt());
+        fileMap.put(FILE_PURGED_AT, info.getPurgedAt());
+        fileMap.put(FILE_CONTENT_CREATED_AT, info.getContentCreatedAt());
+        fileMap.put(FILE_CONTENT_MODIFIED_AT, info.getContentModifiedAt());
+        fileMap.put(FILE_CREATED_BY, info.getCreatedBy());
+        fileMap.put(FILE_MODIFIED_BY, info.getModifiedBy());
+        fileMap.put(FILE_OWNED_BY, info.getOwnedBy());
+        fileMap.put(FILE_SHARED_LINK, info.getSharedLink());
+        fileMap.put(FILE_PARENT, info.getParent());
+        fileMap.put(FILE_ITEM_STATUS, info.getItemStatus());
+        fileMap.put(FILE_TAGS, info.getTags());
+        fileMap.put(FILE_COLLECTIONS, info.getCollections());
     }
 
     /**

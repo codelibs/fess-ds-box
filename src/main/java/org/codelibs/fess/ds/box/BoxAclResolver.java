@@ -34,6 +34,7 @@ import com.box.sdk.BoxCollaboration;
 import com.box.sdk.BoxCollaborator;
 import com.box.sdk.BoxFile;
 import com.box.sdk.BoxFolder;
+import com.box.sdk.BoxItem;
 import com.box.sdk.BoxSharedLink;
 import com.box.sdk.BoxUser;
 
@@ -253,16 +254,7 @@ public class BoxAclResolver {
     protected List<String> getRoles(final BoxClient client, final BoxFile.Info info, final List<String> baseRoles,
             final DocumentQuality quality) {
         final List<String> ownerRoles = getOwnerRoles(info);
-
-        final List<String> ancestorRoles = new ArrayList<>();
-        final List<BoxFolder.Info> pathCollection = info.getPathCollection();
-        if (pathCollection != null) {
-            for (final BoxFolder.Info ancestor : pathCollection) {
-                if (!ROOT_FOLDER_ID.equals(ancestor.getID())) {
-                    ancestorRoles.addAll(getFolderRoles(client, ancestor.getID(), quality));
-                }
-            }
-        }
+        final List<String> ancestorRoles = getAncestorRoles(client, info, quality);
 
         List<String> fileRoles = List.of();
         if (hasCollaborations(info.getHasCollaborations())) {
@@ -276,6 +268,77 @@ public class BoxAclResolver {
             }
         }
 
+        return merge(baseRoles, defaultPermissions, ownerRoles, ancestorRoles, fileRoles, getSharedLinkRoles(info));
+    }
+
+    /**
+     * Resolves the effective search roles of a folder, for use when the folder is itself
+     * indexed as a document (see {@code ignore_folder}).
+     *
+     * @param client the client to read ancestor and own folder collaborations with; it must be
+     *        scoped to the same identity the folder was walked as
+     * @param info the folder information; {@code path_collection}, {@code owned_by} and
+     *        {@code shared_link} must have been requested
+     * @param baseRoles roles supplied by the caller, typically the data store configuration's permissions
+     * @return the effective search roles
+     */
+    public List<String> getRoles(final BoxClient client, final BoxFolder.Info info, final List<String> baseRoles) {
+        return getRoles(client, info, baseRoles, null);
+    }
+
+    /**
+     * Resolves the search roles granted to a folder.
+     *
+     * <p>Unlike a file, a folder's own access is not read through a dedicated "does this file
+     * carry its own collaborations" lookup: it is read through
+     * {@link #getFolderRoles(BoxClient, String, DocumentQuality)} - the very cache a descendant
+     * file's ancestor-role lookup already populates - so indexing the folder itself costs at most
+     * one lookup that a descendant file would have made anyway.</p>
+     *
+     * @param client the Box client
+     * @param info the folder information
+     * @param baseRoles default roles to include
+     * @param quality optional degradation tracker; if a collaboration lookup fails, {@code quality.aclDegraded} is set to true
+     * @return the folder's resolved search roles
+     */
+    protected List<String> getRoles(final BoxClient client, final BoxFolder.Info info, final List<String> baseRoles,
+            final DocumentQuality quality) {
+        final List<String> ownerRoles = getOwnerRoles(info);
+        final List<String> ancestorRoles = getAncestorRoles(client, info, quality);
+        final List<String> ownRoles = getFolderRoles(client, info.getID(), quality);
+
+        return merge(baseRoles, defaultPermissions, ownerRoles, ancestorRoles, ownRoles, getSharedLinkRoles(info));
+    }
+
+    /**
+     * Resolves the search roles contributed by every ancestor folder in an item's
+     * {@code path_collection}, skipping the user-specific root ({@value #ROOT_FOLDER_ID}).
+     *
+     * @param client the client to read ancestor folder collaborations with
+     * @param info the item information
+     * @param quality optional degradation tracker; if a collaboration lookup fails, {@code quality.aclDegraded} is set to true
+     * @return the merged ancestor search roles
+     */
+    private List<String> getAncestorRoles(final BoxClient client, final BoxItem.Info info, final DocumentQuality quality) {
+        final List<String> ancestorRoles = new ArrayList<>();
+        final List<BoxFolder.Info> pathCollection = info.getPathCollection();
+        if (pathCollection != null) {
+            for (final BoxFolder.Info ancestor : pathCollection) {
+                if (!ROOT_FOLDER_ID.equals(ancestor.getID())) {
+                    ancestorRoles.addAll(getFolderRoles(client, ancestor.getID(), quality));
+                }
+            }
+        }
+        return ancestorRoles;
+    }
+
+    /**
+     * Resolves the search role granted by an item's enterprise-wide shared link, if any.
+     *
+     * @param info the item information
+     * @return a single-element list with {@link #companySharedLinkRole}, or an empty list
+     */
+    private List<String> getSharedLinkRoles(final BoxItem.Info info) {
         final List<String> sharedLinkRoles = new ArrayList<>();
         if (StringUtil.isNotBlank(companySharedLinkRole)) {
             final BoxSharedLink sharedLink = info.getSharedLink();
@@ -283,17 +346,16 @@ public class BoxAclResolver {
                 sharedLinkRoles.add(companySharedLinkRole);
             }
         }
-
-        return merge(baseRoles, defaultPermissions, ownerRoles, ancestorRoles, fileRoles, sharedLinkRoles);
+        return sharedLinkRoles;
     }
 
     /**
-     * Resolves the search roles granted to a file's owner.
+     * Resolves the search roles granted to an item's owner.
      *
-     * @param info the file information
+     * @param info the item information
      * @return the owner's search roles, or an empty list if there is no owner
      */
-    protected List<String> getOwnerRoles(final BoxFile.Info info) {
+    protected List<String> getOwnerRoles(final BoxItem.Info info) {
         final List<String> ownerRoles = new ArrayList<>();
         final BoxUser.Info owner = info.getOwnedBy();
         if (owner != null) {

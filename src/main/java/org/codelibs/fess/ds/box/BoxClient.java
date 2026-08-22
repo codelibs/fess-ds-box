@@ -362,11 +362,34 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
 
     /**
      * Recursively retrieves all files within a given folder and passes them to a consumer.
+     * Folders are still traversed, but never surfaced - equivalent to calling
+     * {@link #getFiles(BoxFolder, String[], Consumer, Consumer)} with a null folder consumer.
+     *
      * @param folder the folder to start from
      * @param fields the fields to retrieve for each item
-     * @param consumer a consumer to process each file
+     * @param fileConsumer a consumer to process each file
      */
-    public void getFiles(final BoxFolder folder, final String[] fields, final Consumer<BoxFile> consumer) {
+    public void getFiles(final BoxFolder folder, final String[] fields, final Consumer<BoxFile> fileConsumer) {
+        getFiles(folder, fields, fileConsumer, null);
+    }
+
+    /**
+     * Recursively retrieves all files - and, if {@code folderConsumer} is non-null, all
+     * descendant folders - within a given folder and passes them to the corresponding consumer.
+     *
+     * <p>A folder is always traversed regardless of {@code folderConsumer}, since files inside
+     * it must still be reached. Passing {@code null} only stops the folder itself from being
+     * surfaced to the caller; it costs nothing beyond the one null check per folder, since no
+     * extra Box API call is made for it.</p>
+     *
+     * @param folder the folder to start from
+     * @param fields the fields to retrieve for each item
+     * @param fileConsumer a consumer to process each file
+     * @param folderConsumer a consumer to process each descendant folder, or {@code null} to
+     *        only recurse into folders without surfacing them
+     */
+    public void getFiles(final BoxFolder folder, final String[] fields, final Consumer<BoxFile> fileConsumer,
+            final Consumer<BoxFolder> folderConsumer) {
         if (logger.isDebugEnabled()) {
             logger.debug("Crawling folder {}", folder.getID());
         }
@@ -382,10 +405,14 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
             }
             switch (info.getType()) {
             case ITEM_TYPE_FILE:
-                consumer.accept(new BoxFile(connection, info.getID()));
+                fileConsumer.accept(new BoxFile(connection, info.getID()));
                 break;
             case ITEM_TYPE_FOLDER:
-                getFiles(getFolder(info.getID()), fields, consumer);
+                final BoxFolder childFolder = getFolder(info.getID());
+                if (folderConsumer != null) {
+                    folderConsumer.accept(childFolder);
+                }
+                getFiles(childFolder, fields, fileConsumer, folderConsumer);
                 break;
             default:
                 logger.warn("Unknown item type: {}", info.getType());

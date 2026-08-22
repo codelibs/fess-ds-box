@@ -18,13 +18,19 @@ package org.codelibs.fess.ds.box;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.ds.box.UnitDsTestCase;
 
 import com.box.sdk.BoxAPIConnection;
+import com.box.sdk.BoxFile;
+import com.box.sdk.BoxFolder;
+import com.box.sdk.BoxItem;
 
 public class BoxClientTest extends UnitDsTestCase {
 
@@ -310,6 +316,130 @@ public class BoxClientTest extends UnitDsTestCase {
         assertNotNull("the proxy itself must still be set", con.getProxy());
         assertNull("basic auth must not be applied with only a username", con.getProxyUsername());
         assertNull("basic auth must not be applied with only a username", con.getProxyPassword());
+    }
+
+    // --- getFiles(BoxFolder, String[], Consumer<BoxFile>, Consumer<BoxFolder>) ---
+
+    private static final String[] TEST_FIELDS = { "type", "id", "name" };
+
+    private static BoxItem.Info fileInfo(final String id) {
+        return new BoxFile(null, id).new Info("{\"type\":\"file\",\"id\":\"" + id + "\"}");
+    }
+
+    private static BoxItem.Info folderInfo(final String id) {
+        return new BoxFolder(null, id).new Info("{\"type\":\"folder\",\"id\":\"" + id + "\"}");
+    }
+
+    /** A {@link BoxFolder} whose children are canned, so recursion needs no network access. */
+    static class RecordingFolder extends BoxFolder {
+        private final List<BoxItem.Info> children;
+
+        RecordingFolder(final String id, final List<BoxItem.Info> children) {
+            super(null, id);
+            this.children = children;
+        }
+
+        @Override
+        public Iterable<BoxItem.Info> getChildren(final String... fields) {
+            return children;
+        }
+    }
+
+    /**
+     * A {@link BoxClient} whose {@link #getFolder(String)} returns pre-registered
+     * {@link RecordingFolder}s instead of a fresh, network-backed {@link BoxFolder} - this is
+     * what lets a multi-level recursion run entirely offline.
+     */
+    static class FolderLookupBoxClient extends BoxClient {
+        private final Map<String, BoxFolder> foldersById = new HashMap<>();
+
+        void registerFolder(final BoxFolder folder) {
+            foldersById.put(folder.getID(), folder);
+        }
+
+        @Override
+        public BoxFolder getFolder(final String folderId) {
+            final BoxFolder folder = foldersById.get(folderId);
+            return folder != null ? folder : super.getFolder(folderId);
+        }
+    }
+
+    /**
+     * A {@link FolderLookupBoxClient} that records what the 4-arg {@link #getFiles} was actually
+     * called with, so a test driving the 3-arg convenience overload can assert what it delegated
+     * to, rather than only checking outcomes (file ids) that would be unaffected by the overload
+     * delegating with the wrong folder consumer.
+     */
+    static class FolderConsumerCapturingBoxClient extends FolderLookupBoxClient {
+        boolean fourArgInvoked;
+        Consumer<BoxFolder> lastFolderConsumer;
+
+        @Override
+        public void getFiles(final BoxFolder folder, final String[] fields, final Consumer<BoxFile> fileConsumer,
+                final Consumer<BoxFolder> folderConsumer) {
+            fourArgInvoked = true;
+            lastFolderConsumer = folderConsumer;
+            super.getFiles(folder, fields, fileConsumer, folderConsumer);
+        }
+    }
+
+    /** Builds a two-level tree: root -> [file f1, folder d1], d1 -> [file f2]. */
+    private FolderLookupBoxClient newTreeClient() {
+        final RecordingFolder d1 = new RecordingFolder("d1", List.of(fileInfo("f2")));
+        final FolderLookupBoxClient client = new FolderLookupBoxClient();
+        // init() is never called in this test - it needs real JWT credentials - so
+        // maxRetryCount defaults to 0, and the per-item retry loop in getFiles would then never
+        // run its body at all, silently dropping every child. Set it explicitly instead.
+        client.maxRetryCount = 1;
+        client.registerFolder(d1);
+        return client;
+    }
+
+    private RecordingFolder rootFolder() {
+        return new RecordingFolder("root", List.of(fileInfo("f1"), folderInfo("d1")));
+    }
+
+    @Test
+    public void test_getFiles_fourArg_emitsFilesAndFoldersWhenFolderConsumerProvided() {
+        final FolderLookupBoxClient client = newTreeClient();
+        final List<String> fileIds = new ArrayList<>();
+        final List<String> folderIds = new ArrayList<>();
+
+        client.getFiles(rootFolder(), TEST_FIELDS, f -> fileIds.add(f.getID()), d -> folderIds.add(d.getID()));
+
+        assertEquals(List.of("f1", "f2"), fileIds);
+        assertEquals(List.of("d1"), folderIds);
+    }
+
+    @Test
+    public void test_getFiles_fourArg_stillFindsNestedFilesWhenFolderConsumerNull() {
+        // The core regression guard: a caller who does not want folders must see exactly the
+        // same files as before - recursion must not depend on the folder consumer.
+        final FolderLookupBoxClient client = newTreeClient();
+        final List<String> fileIds = new ArrayList<>();
+
+        client.getFiles(rootFolder(), TEST_FIELDS, f -> fileIds.add(f.getID()), null);
+
+        assertEquals(List.of("f1", "f2"), fileIds);
+    }
+
+    @Test
+    public void test_getFiles_threeArgOverload_delegatesToFourArgWithNullFolderConsumer() {
+        // Asserting only file ids (as this test previously did) would pass even if the 3-arg
+        // overload delegated with a non-null folder consumer, since nothing here would be
+        // affected by that. Intercept the 4-arg call the 3-arg overload delegates to instead, and
+        // assert what it actually received.
+        final FolderConsumerCapturingBoxClient client = new FolderConsumerCapturingBoxClient();
+        client.maxRetryCount = 1;
+        client.registerFolder(new RecordingFolder("d1", List.of(fileInfo("f2"))));
+        final List<String> fileIds = new ArrayList<>();
+
+        final Consumer<BoxFile> fileConsumer = f -> fileIds.add(f.getID());
+        client.getFiles(rootFolder(), TEST_FIELDS, fileConsumer);
+
+        assertTrue("the 3-arg overload must delegate to the 4-arg method", client.fourArgInvoked);
+        assertNull("the 3-arg overload must delegate with a null folder consumer", client.lastFolderConsumer);
+        assertEquals(List.of("f1", "f2"), fileIds);
     }
 
     /**
