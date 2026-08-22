@@ -83,15 +83,42 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
     protected static final String PASSPHRASE_PARAM = "passphrase";
     /** Parameter key for the enterprise ID. */
     protected static final String ENTERPRISE_ID_PARAM = "enterprise_id";
-    /** Parameter key for the maximum number of retries for API calls. */
+    /**
+     * Parameter key for the maximum number of retries for API calls.
+     *
+     * <p>This is a different layer from {@link #MAX_RETRY_ATTEMPTS}: this one is a
+     * plugin-level loop in {@link #getFiles} that retries only {@code 401} responses by
+     * rebuilding the connection. It does not supersede {@link #MAX_RETRY_ATTEMPTS}, which
+     * drives {@link BoxAPIConnection}'s own retry of {@code 429} and {@code >= 500}
+     * responses, with jittered exponential backoff that honours {@code Retry-After}.</p>
+     */
     protected static final String MAX_RETRY_COUNT = "max_retry_count";
 
     /** Parameter key for the proxy host. */
     protected static final String PROXY_HOST = "proxy_host";
     /** Parameter key for the proxy port. */
     protected static final String PROXY_PORT = "proxy_port";
+    /** Parameter key for the proxy user name. */
+    protected static final String PROXY_USERNAME = "proxy_username";
+    /** Parameter key for the proxy password. */
+    protected static final String PROXY_PASSWORD = "proxy_password";
     /** Parameter key for the refresh token interval. */
     protected static final String REFRESH_TOKEN_INTERVAL_PARAM = "refresh_token_interval";
+
+    /** Parameter key for the connection timeout in milliseconds. */
+    protected static final String CONNECT_TIMEOUT = "connect_timeout";
+    /** Parameter key for the read timeout in milliseconds. */
+    protected static final String READ_TIMEOUT = "read_timeout";
+    /**
+     * Parameter key for the SDK's retry count for 429 and 5xx responses.
+     *
+     * <p>This is a different layer from {@link #MAX_RETRY_COUNT}: this one drives
+     * {@link BoxAPIConnection}'s own retry of {@code 429} and {@code >= 500} responses,
+     * with jittered exponential backoff that honours {@code Retry-After}. It does not
+     * supersede {@link #MAX_RETRY_COUNT}, which is a plugin-level loop in {@link #getFiles}
+     * that retries only {@code 401} by rebuilding the connection.</p>
+     */
+    protected static final String MAX_RETRY_ATTEMPTS = "max_retry_attempts";
 
     /** Constant for the 'file' item type in Box. */
     protected static final String ITEM_TYPE_FILE = "file";
@@ -230,11 +257,12 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
     }
 
     /**
-     * Applies the proxy settings shared by every connection this client creates.
+     * Applies the connection settings shared by every connection this client creates:
+     * proxy, connect/read timeouts and the SDK's own retry count.
      *
      * <p>Extracted from {@link #createConnection()} so that {@link #forUser(String)}
      * configures its per-user connection identically, instead of silently bypassing
-     * the proxy.</p>
+     * the proxy or the timeouts.</p>
      *
      * @param con the connection to configure
      */
@@ -246,7 +274,23 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
                 logger.debug("proxy: {}:{}", proxyHost, proxyPort);
             }
             con.setProxy((new Proxy(Proxy.Type.HTTP, new InetSocketAddress(proxyHost, Integer.parseInt(proxyPort)))));
+
+            final String proxyUsername = getInitParameter(PROXY_USERNAME, StringUtil.EMPTY);
+            final String proxyPassword = getInitParameter(PROXY_PASSWORD, StringUtil.EMPTY);
+            if (StringUtil.isNotBlank(proxyUsername) && StringUtil.isNotBlank(proxyPassword)) {
+                con.setProxyBasicAuthentication(proxyUsername, proxyPassword);
+            }
         }
+
+        final int connectTimeout = getInitParameter(CONNECT_TIMEOUT, 0, Integer.class);
+        if (connectTimeout > 0) {
+            con.setConnectTimeout(connectTimeout);
+        }
+        final int readTimeout = getInitParameter(READ_TIMEOUT, 0, Integer.class);
+        if (readTimeout > 0) {
+            con.setReadTimeout(readTimeout);
+        }
+        con.setMaxRetryAttempts(getInitParameter(MAX_RETRY_ATTEMPTS, 5, Integer.class));
     }
 
     /**

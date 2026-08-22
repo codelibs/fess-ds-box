@@ -92,6 +92,15 @@ public class BoxDataStoreTest extends UnitDsTestCase {
     }
 
     @Test
+    public void test_getPath_includesFileName() {
+        // include_pattern / exclude_pattern are matched against this value, so the
+        // file name has to be part of it or no pattern can ever select by name.
+        assertEquals("All Files/Projects/report.pdf", BoxDataStore.buildPath(List.of("All Files", "Projects"), "report.pdf"));
+        assertEquals("report.pdf", BoxDataStore.buildPath(List.of(), "report.pdf"));
+        assertEquals("report.pdf", BoxDataStore.buildPath(null, "report.pdf"));
+    }
+
+    @Test
     public void test_Config_defaultValues() {
         final DataStoreParams paramMap = new DataStoreParams();
         final TestableBoxDataStore testDataStore = new TestableBoxDataStore();

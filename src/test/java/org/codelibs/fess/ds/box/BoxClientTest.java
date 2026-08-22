@@ -24,6 +24,8 @@ import java.util.Map;
 import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.ds.box.UnitDsTestCase;
 
+import com.box.sdk.BoxAPIConnection;
+
 public class BoxClientTest extends UnitDsTestCase {
 
     @Override
@@ -192,6 +194,122 @@ public class BoxClientTest extends UnitDsTestCase {
         } catch (final Exception e) {
             fail("close() should not throw exception: " + e.getMessage());
         }
+    }
+
+    @Test
+    public void test_configureConnection_defaultsLeaveTimeoutsUntouchedAndSetMaxRetryAttemptsToFive() {
+        final BoxClient client = new BoxClient();
+        client.setInitParameterMap(new HashMap<>());
+        final BoxAPIConnection con = new BoxAPIConnection("dummy-token");
+        final int defaultConnectTimeout = con.getConnectTimeout();
+        final int defaultReadTimeout = con.getReadTimeout();
+
+        client.configureConnection(con);
+
+        // connect_timeout/read_timeout were never set, so the SDK's own defaults must survive.
+        assertEquals(defaultConnectTimeout, con.getConnectTimeout());
+        assertEquals(defaultReadTimeout, con.getReadTimeout());
+        // max_retry_attempts defaults to 5, matching BoxAPIConnection.DEFAULT_MAX_RETRIES.
+        assertEquals(5, con.getMaxRetryAttempts());
+    }
+
+    @Test
+    public void test_configureConnection_appliesPositiveTimeouts() {
+        final BoxClient client = new BoxClient();
+        final Map<String, Object> params = new HashMap<>();
+        params.put("connect_timeout", "1234");
+        params.put("read_timeout", "5678");
+        client.setInitParameterMap(params);
+        final BoxAPIConnection con = new BoxAPIConnection("dummy-token");
+
+        client.configureConnection(con);
+
+        assertEquals(1234, con.getConnectTimeout());
+        assertEquals(5678, con.getReadTimeout());
+    }
+
+    @Test
+    public void test_configureConnection_ignoresZeroOrNegativeTimeouts() {
+        final BoxClient client = new BoxClient();
+        final Map<String, Object> params = new HashMap<>();
+        params.put("connect_timeout", "0");
+        params.put("read_timeout", "-1");
+        client.setInitParameterMap(params);
+        final BoxAPIConnection con = new BoxAPIConnection("dummy-token");
+        final int defaultConnectTimeout = con.getConnectTimeout();
+        final int defaultReadTimeout = con.getReadTimeout();
+
+        client.configureConnection(con);
+
+        assertEquals(defaultConnectTimeout, con.getConnectTimeout());
+        assertEquals(defaultReadTimeout, con.getReadTimeout());
+    }
+
+    @Test
+    public void test_configureConnection_appliesCustomMaxRetryAttempts() {
+        final BoxClient client = new BoxClient();
+        final Map<String, Object> params = new HashMap<>();
+        params.put("max_retry_attempts", "9");
+        client.setInitParameterMap(params);
+        final BoxAPIConnection con = new BoxAPIConnection("dummy-token");
+
+        client.configureConnection(con);
+
+        assertEquals(9, con.getMaxRetryAttempts());
+    }
+
+    @Test
+    public void test_configureConnection_appliesProxyBasicAuthWhenHostPortUserAndPasswordPresent() {
+        final BoxClient client = new BoxClient();
+        final Map<String, Object> params = new HashMap<>();
+        params.put("proxy_host", "proxy.example.com");
+        params.put("proxy_port", "8080");
+        params.put("proxy_username", "proxy_user");
+        params.put("proxy_password", "proxy_pass");
+        client.setInitParameterMap(params);
+        final BoxAPIConnection con = new BoxAPIConnection("dummy-token");
+
+        client.configureConnection(con);
+
+        assertNotNull(con.getProxy());
+        assertEquals("proxy_user", con.getProxyUsername());
+        assertEquals("proxy_pass", con.getProxyPassword());
+    }
+
+    @Test
+    public void test_configureConnection_skipsProxyAuthWithoutProxyHostAndPort() {
+        final BoxClient client = new BoxClient();
+        final Map<String, Object> params = new HashMap<>();
+        // Username and password given, but no proxy host/port - there is no proxy to
+        // authenticate against, so neither must be applied.
+        params.put("proxy_username", "proxy_user");
+        params.put("proxy_password", "proxy_pass");
+        client.setInitParameterMap(params);
+        final BoxAPIConnection con = new BoxAPIConnection("dummy-token");
+
+        client.configureConnection(con);
+
+        assertNull(con.getProxy());
+        assertNull(con.getProxyUsername());
+        assertNull(con.getProxyPassword());
+    }
+
+    @Test
+    public void test_configureConnection_skipsProxyAuthWhenOnlyUsernameGiven() {
+        final BoxClient client = new BoxClient();
+        final Map<String, Object> params = new HashMap<>();
+        params.put("proxy_host", "proxy.example.com");
+        params.put("proxy_port", "8080");
+        params.put("proxy_username", "proxy_user");
+        // proxy_password intentionally omitted
+        client.setInitParameterMap(params);
+        final BoxAPIConnection con = new BoxAPIConnection("dummy-token");
+
+        client.configureConnection(con);
+
+        assertNotNull("the proxy itself must still be set", con.getProxy());
+        assertNull("basic auth must not be applied with only a username", con.getProxyUsername());
+        assertNull("basic auth must not be applied with only a username", con.getProxyPassword());
     }
 
     /**

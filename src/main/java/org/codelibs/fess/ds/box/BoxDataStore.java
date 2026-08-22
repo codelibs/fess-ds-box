@@ -131,7 +131,7 @@ public class BoxDataStore extends AbstractDataStore {
      */
     protected static final String[] SENSITIVE_PARAMS =
             { BoxClient.CLIENT_ID_PARAM, BoxClient.CLIENT_SECRET_PARAM, BoxClient.PUBLIC_KEY_ID_PARAM, BoxClient.PRIVATE_KEY_PARAM,
-                    BoxClient.PASSPHRASE_PARAM, BoxClient.ENTERPRISE_ID_PARAM, "proxy_password" };
+                    BoxClient.PASSPHRASE_PARAM, BoxClient.ENTERPRISE_ID_PARAM, BoxClient.PROXY_PASSWORD };
 
     // scripts
     /** Key for the file data map in the script context. */
@@ -630,13 +630,30 @@ public class BoxDataStore extends AbstractDataStore {
     }
 
     /**
-     * Constructs the hierarchical path of a Box item.
+     * Builds the path used for include and exclude pattern matching.
+     *
+     * @param ancestorNames the names of the ancestor folders, may be null
+     * @param name the item name
+     * @return the slash separated path, ending with the item name
+     */
+    static String buildPath(final List<String> ancestorNames, final String name) {
+        if (ancestorNames == null || ancestorNames.isEmpty()) {
+            return name;
+        }
+        return String.join("/", ancestorNames) + "/" + name;
+    }
+
+    /**
+     * Constructs the hierarchical path of a Box item, including its own name.
      *
      * @param info The item information.
      * @return The slash-separated path.
      */
     protected String getPath(final BoxItem.Info info) {
-        return info.getPathCollection().stream().map(BoxItem.Info::getName).collect(Collectors.joining("/"));
+        final List<BoxFolder.Info> pathCollection = info.getPathCollection();
+        final List<String> ancestorNames =
+                pathCollection == null ? List.of() : pathCollection.stream().map(BoxFolder.Info::getName).collect(Collectors.toList());
+        return buildPath(ancestorNames, info.getName());
     }
 
     /**
