@@ -27,6 +27,7 @@ import com.box.sdk.BoxFile;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class BoxAclResolverTest {
@@ -60,16 +61,19 @@ public class BoxAclResolverTest {
         List<String> fileRoles = List.of();
         int folderLookups;
         int fileCollaborationLookups;
+        /** The client most recently handed to {@link #loadFolderRoles}, so tests can pin R17's contract. */
+        BoxClient lastClient;
 
         StubResolver(final Map<String, List<String>> folderRoles, final List<String> defaultPermissions,
                 final String companySharedLinkRole) {
-            super(null, defaultPermissions, companySharedLinkRole);
+            super(defaultPermissions, companySharedLinkRole);
             this.folderRoles = folderRoles;
         }
 
         @Override
-        protected List<String> loadFolderRoles(final String folderId) {
+        protected List<String> loadFolderRoles(final BoxClient client, final String folderId) {
             folderLookups++;
+            lastClient = client;
             return folderRoles.getOrDefault(folderId, List.of());
         }
 
@@ -94,9 +98,9 @@ public class BoxAclResolverTest {
     public void test_getFolderRoles_cachesPerFolder() {
         final StubResolver resolver = new StubResolver(Map.of("100", List.of("1user")), List.of(), null);
 
-        assertEquals(List.of("1user"), resolver.getFolderRoles("100"));
-        assertEquals(List.of("1user"), resolver.getFolderRoles("100"));
-        assertEquals(List.of("1user"), resolver.getFolderRoles("100"));
+        assertEquals(List.of("1user"), resolver.getFolderRoles(null, "100"));
+        assertEquals(List.of("1user"), resolver.getFolderRoles(null, "100"));
+        assertEquals(List.of("1user"), resolver.getFolderRoles(null, "100"));
 
         assertEquals(1, resolver.folderLookups, "the folder must only be read once");
     }
@@ -107,7 +111,7 @@ public class BoxAclResolverTest {
             private boolean failedOnce;
 
             @Override
-            protected List<String> loadFolderRoles(final String folderId) {
+            protected List<String> loadFolderRoles(final BoxClient client, final String folderId) {
                 folderLookups++;
                 if (!failedOnce) {
                     failedOnce = true;
@@ -117,8 +121,8 @@ public class BoxAclResolverTest {
             }
         };
 
-        assertEquals(List.of(), resolver.getFolderRoles("100"), "a failed lookup must not poison the result");
-        assertEquals(List.of("1user"), resolver.getFolderRoles("100"), "the retry must return the real roles");
+        assertEquals(List.of(), resolver.getFolderRoles(null, "100"), "a failed lookup must not poison the result");
+        assertEquals(List.of("1user"), resolver.getFolderRoles(null, "100"), "the retry must return the real roles");
         assertTrue(resolver.folderLookups > 1, "a failed lookup must not be cached, so it is retried");
     }
 
@@ -136,7 +140,7 @@ public class BoxAclResolverTest {
 
     @Test
     public void test_getOwnerRoles_nullOwner_returnsEmptyWithoutThrowing() {
-        final BoxAclResolver resolver = new BoxAclResolver(null, List.of(), null);
+        final BoxAclResolver resolver = new BoxAclResolver(List.of(), null);
 
         assertEquals(List.of(), resolver.getOwnerRoles(info("{}")));
     }
@@ -145,7 +149,7 @@ public class BoxAclResolverTest {
     public void test_getRoles_hasCollaborationsFalse_skipsFileLookup() {
         final StubResolver resolver = new StubResolver(Map.of(), List.of(), null);
 
-        resolver.getRoles(info("{\"has_collaborations\":false}"), List.of());
+        resolver.getRoles(null, info("{\"has_collaborations\":false}"), List.of());
 
         assertEquals(0, resolver.fileCollaborationLookups, "the optimisation must skip the per-file lookup");
     }
@@ -154,7 +158,7 @@ public class BoxAclResolverTest {
     public void test_getRoles_hasCollaborationsTrue_performsFileLookup() {
         final StubResolver resolver = new StubResolver(Map.of(), List.of(), null);
 
-        resolver.getRoles(info("{\"has_collaborations\":true}"), List.of());
+        resolver.getRoles(null, info("{\"has_collaborations\":true}"), List.of());
 
         assertEquals(1, resolver.fileCollaborationLookups);
     }
@@ -163,7 +167,7 @@ public class BoxAclResolverTest {
     public void test_getRoles_nullPathCollectionAndOwner_doesNotThrow() {
         final StubResolver resolver = new StubResolver(Map.of(), List.of(), null);
 
-        assertDoesNotThrow(() -> resolver.getRoles(info("{\"has_collaborations\":false}"), List.of()));
+        assertDoesNotThrow(() -> resolver.getRoles(null, info("{\"has_collaborations\":false}"), List.of()));
     }
 
     @Test
@@ -172,10 +176,26 @@ public class BoxAclResolverTest {
         final BoxFile.Info info = info(
                 "{\"has_collaborations\":false,\"path_collection\":{\"total_count\":2,\"entries\":[{\"id\":\"0\"},{\"id\":\"100\"}]}}");
 
-        final List<String> roles = resolver.getRoles(info, List.of());
+        final List<String> roles = resolver.getRoles(null, info, List.of());
 
         assertEquals(List.of("gooduser"), roles);
         assertEquals(1, resolver.folderLookups, "the root folder id \"0\" must never be looked up");
+    }
+
+    @Test
+    public void test_getRoles_passesCallTimeClientToFolderLookup() {
+        // R17: the resolver holds no client of its own - each call must reach the folder
+        // lookup with whichever client the caller passed in that time, since each user now
+        // crawls through its own BoxClient. new BoxClient() performs no network access, so a
+        // plain instance is a safe, cheap sentinel to prove identity with assertSame.
+        final StubResolver resolver = new StubResolver(Map.of("100", List.of("gooduser")), List.of(), null);
+        final BoxClient callTimeClient = new BoxClient();
+        final BoxFile.Info info =
+                info("{\"has_collaborations\":false,\"path_collection\":{\"total_count\":1,\"entries\":[{\"id\":\"100\"}]}}");
+
+        resolver.getRoles(callTimeClient, info, List.of());
+
+        assertSame(callTimeClient, resolver.lastClient, "the client passed to getRoles must reach the folder lookup unchanged");
     }
 
     @Test
@@ -183,7 +203,7 @@ public class BoxAclResolverTest {
         final StubResolver resolver = new StubResolver(Map.of(), List.of(), "shared-role");
         final BoxFile.Info info = info("{\"has_collaborations\":false,\"shared_link\":{\"effective_access\":\"company\"}}");
 
-        assertTrue(resolver.getRoles(info, List.of()).contains("shared-role"));
+        assertTrue(resolver.getRoles(null, info, List.of()).contains("shared-role"));
     }
 
     @Test
@@ -191,7 +211,7 @@ public class BoxAclResolverTest {
         final StubResolver resolver = new StubResolver(Map.of(), List.of(), "shared-role");
         final BoxFile.Info info = info("{\"has_collaborations\":false,\"shared_link\":{\"effective_access\":\"open\"}}");
 
-        assertFalse(resolver.getRoles(info, List.of()).contains("shared-role"));
+        assertFalse(resolver.getRoles(null, info, List.of()).contains("shared-role"));
     }
 
     @Test
@@ -199,7 +219,7 @@ public class BoxAclResolverTest {
         final StubResolver resolver = new StubResolver(Map.of(), List.of(), null);
         final BoxFile.Info info = info("{\"has_collaborations\":false,\"shared_link\":{\"effective_access\":\"company\"}}");
 
-        assertEquals(List.of(), resolver.getRoles(info, List.of()));
+        assertEquals(List.of(), resolver.getRoles(null, info, List.of()));
     }
 
     @Test
@@ -219,7 +239,7 @@ public class BoxAclResolverTest {
                 info("{\"has_collaborations\":true," + "\"path_collection\":{\"total_count\":1,\"entries\":[{\"id\":\"100\"}]},"
                         + "\"shared_link\":{\"effective_access\":\"company\"}}");
 
-        final List<String> roles = resolver.getRoles(info, List.of("baseuser"));
+        final List<String> roles = resolver.getRoles(null, info, List.of("baseuser"));
 
         assertEquals(List.of("baseuser", "defaultuser", "owneruser", "folderuser", "shared", "fileuser"), roles);
     }

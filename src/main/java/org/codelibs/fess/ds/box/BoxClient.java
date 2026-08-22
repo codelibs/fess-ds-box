@@ -47,6 +47,8 @@ import com.box.sdk.BoxFolder;
 import com.box.sdk.BoxItem;
 import com.box.sdk.BoxUser;
 import com.box.sdk.EncryptionAlgorithm;
+import com.box.sdk.IAccessTokenCache;
+import com.box.sdk.InMemoryLRUAccessTokenCache;
 import com.box.sdk.JWTEncryptionPreferences;
 
 /**
@@ -96,6 +98,9 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
     /** Constant for the 'folder' item type in Box. */
     protected static final String ITEM_TYPE_FOLDER = "folder";
 
+    /** The number of access tokens the shared token cache keeps in memory. */
+    protected static final int TOKEN_CACHE_SIZE = 512;
+
     /** The base URL for the Box application. */
     protected String baseUrl;
 
@@ -110,6 +115,21 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
 
     /** The maximum number of times to retry a failed API call. */
     protected int maxRetryCount;
+
+    /**
+     * Cache shared by all connections created from this client, including the ones
+     * handed out by {@link #forUser(String)}, so that a per-user connection does not
+     * perform its own token exchange.
+     */
+    protected IAccessTokenCache accessTokenCache;
+
+    /**
+     * The id of the user this client impersonates, or null for the enterprise service
+     * account. Set once by {@link #forUser(String)} and re-applied by {@link #createConnection()}
+     * whenever that method rebuilds the connection, so a mid-crawl reconnect (e.g. after a 401)
+     * does not silently fall back to the service account identity.
+     */
+    protected String impersonatedUserId;
 
     @Override
     public synchronized void init() {
@@ -145,12 +165,15 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
 
         maxRetryCount = getInitParameter(MAX_RETRY_COUNT, 10, Integer.class);
 
+        accessTokenCache = new InMemoryLRUAccessTokenCache(TOKEN_CACHE_SIZE);
+
         createConnection();
     }
 
     /**
      * Creates and configures a new Box API connection.
-     * This method handles proxy settings and schedules a task to refresh the access token periodically.
+     * This method handles proxy settings and, for the primary (non-impersonating) client
+     * only, schedules a task to refresh the access token periodically.
      */
     protected void createConnection() {
         if (logger.isDebugEnabled()) {
@@ -162,14 +185,14 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
         }
 
         try {
-            final BoxDeveloperEditionAPIConnection con = BoxDeveloperEditionAPIConnection.getAppEnterpriseConnection(boxConfig);
-            final String proxyHost = getInitParameter(PROXY_HOST, StringUtil.EMPTY);
-            final String proxyPort = getInitParameter(PROXY_PORT, StringUtil.EMPTY);
-            if (StringUtil.isNotBlank(proxyHost) && StringUtil.isNotBlank(proxyPort)) {
-                if (logger.isDebugEnabled()) {
-                    logger.debug("proxy: {}:{}", proxyHost, proxyPort);
-                }
-                con.setProxy((new Proxy(Proxy.Type.HTTP, new InetSocketAddress(proxyHost, Integer.parseInt(proxyPort)))));
+            final BoxDeveloperEditionAPIConnection con =
+                    BoxDeveloperEditionAPIConnection.getAppEnterpriseConnection(boxConfig, accessTokenCache);
+            configureConnection(con);
+            if (impersonatedUserId != null) {
+                // This client is one forUser() handed out. A rebuild (e.g. the 401 retry in
+                // getFiles()) must keep impersonating the same user - otherwise every request
+                // issued after the rebuild silently runs as the enterprise service account.
+                con.asUser(impersonatedUserId);
             }
             connection = con;
             if (logger.isDebugEnabled()) {
@@ -182,16 +205,48 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
             throw new DataStoreException("Failed to create new connection.", e);
         }
 
-        refreshTokenTask = TimeoutManager.getInstance().addTimeoutTarget(() -> {
-            if (connection != null) {
-                logger.info("Rrefreshing a current access token.");
-                try {
-                    connection.refresh();
-                } catch (final Exception e) {
-                    logger.warn("Failed to refresh an access token.", e);
+        if (impersonatedUserId == null) {
+            // Per-user clients are deliberately never closed - they share one token, so
+            // revoking per user would break every other concurrently crawling user - and this
+            // task is a `permanent` TimeoutManager registration that only close() cancels. If
+            // every per-user client scheduled one, every 401-triggered reconnect would leak a
+            // timer refreshing a dead crawl's connection forever. It is unnecessary there anyway:
+            // BoxDeveloperEditionAPIConnection.canRefresh() always returns true and autoRefresh
+            // defaults to true, so a per-user connection refreshes itself transparently the next
+            // time it is used, and the As-User header survives that refresh because it lives in
+            // a final field that authenticate()/refresh() never touch. This belt-and-braces timer
+            // stays only for the single primary client that init() creates.
+            refreshTokenTask = TimeoutManager.getInstance().addTimeoutTarget(() -> {
+                if (connection != null) {
+                    logger.info("Rrefreshing a current access token.");
+                    try {
+                        connection.refresh();
+                    } catch (final Exception e) {
+                        logger.warn("Failed to refresh an access token.", e);
+                    }
                 }
+            }, Integer.parseInt(getInitParameter(REFRESH_TOKEN_INTERVAL_PARAM, DEFAULT_REFRESH_TOKEN_INTERVAL)), true);
+        }
+    }
+
+    /**
+     * Applies the proxy settings shared by every connection this client creates.
+     *
+     * <p>Extracted from {@link #createConnection()} so that {@link #forUser(String)}
+     * configures its per-user connection identically, instead of silently bypassing
+     * the proxy.</p>
+     *
+     * @param con the connection to configure
+     */
+    protected void configureConnection(final BoxAPIConnection con) {
+        final String proxyHost = getInitParameter(PROXY_HOST, StringUtil.EMPTY);
+        final String proxyPort = getInitParameter(PROXY_PORT, StringUtil.EMPTY);
+        if (StringUtil.isNotBlank(proxyHost) && StringUtil.isNotBlank(proxyPort)) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("proxy: {}:{}", proxyHost, proxyPort);
             }
-        }, Integer.parseInt(getInitParameter(REFRESH_TOKEN_INTERVAL_PARAM, DEFAULT_REFRESH_TOKEN_INTERVAL)), true);
+            con.setProxy((new Proxy(Proxy.Type.HTTP, new InetSocketAddress(proxyHost, Integer.parseInt(proxyPort)))));
+        }
     }
 
     /**
@@ -264,11 +319,10 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
     /**
      * Recursively retrieves all files within a given folder and passes them to a consumer.
      * @param folder the folder to start from
-     * @param userId the ID of the user to impersonate (can be null)
      * @param fields the fields to retrieve for each item
      * @param consumer a consumer to process each file
      */
-    public void getFiles(final BoxFolder folder, final String userId, final String[] fields, final Consumer<BoxFile> consumer) {
+    public void getFiles(final BoxFolder folder, final String[] fields, final Consumer<BoxFile> consumer) {
         if (logger.isDebugEnabled()) {
             logger.debug("Crawling folder {}", folder.getID());
         }
@@ -287,7 +341,7 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
                 consumer.accept(new BoxFile(connection, info.getID()));
                 break;
             case ITEM_TYPE_FOLDER:
-                getFiles(getFolder(info.getID()), userId, fields, consumer);
+                getFiles(getFolder(info.getID()), fields, consumer);
                 break;
             default:
                 logger.warn("Unknown item type: {}", info.getType());
@@ -368,6 +422,40 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
      */
     public void asUser(final String userId) {
         connection.asUser(userId);
+    }
+
+    /**
+     * Returns a client bound to a single user, backed by its own connection.
+     *
+     * <p>{@link #asUser(String)} mutates the connection it is called on. Worker
+     * threads crawling one user's files can still be running when the caller moves
+     * on to the next user, so mutating a shared connection risks issuing a request
+     * under the wrong identity. Each user therefore gets an independent connection
+     * that is never touched by any other user's crawl; the returned client shares
+     * this client's access token cache so that impersonating the user does not
+     * require its own token exchange.</p>
+     *
+     * @param userId the ID of the user to act as
+     * @return a client scoped to that user
+     */
+    public BoxClient forUser(final String userId) {
+        final BoxClient userClient = new BoxClient();
+        userClient.baseUrl = baseUrl;
+        userClient.boxConfig = boxConfig;
+        userClient.maxRetryCount = maxRetryCount;
+        userClient.accessTokenCache = accessTokenCache;
+        userClient.impersonatedUserId = userId;
+        // init() is never called on userClient - it would no-op anyway, since baseUrl is
+        // already set above - so maxCachedContentSize (the only inherited field this class
+        // reads) must be copied explicitly or file downloads would silently stop honouring it.
+        userClient.setMaxCachedContentSize(maxCachedContentSize);
+        userClient.setInitParameterMap(initParamMap);
+        final BoxDeveloperEditionAPIConnection con =
+                BoxDeveloperEditionAPIConnection.getAppEnterpriseConnection(boxConfig, accessTokenCache);
+        configureConnection(con);
+        con.asUser(userId);
+        userClient.connection = con;
+        return userClient;
     }
 
 }

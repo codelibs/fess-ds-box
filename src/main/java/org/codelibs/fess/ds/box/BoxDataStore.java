@@ -41,7 +41,6 @@ import org.codelibs.core.stream.StreamUtil;
 import org.codelibs.fess.Constants;
 import org.codelibs.fess.app.service.FailureUrlService;
 import org.codelibs.fess.crawler.exception.CrawlingAccessException;
-import org.codelibs.fess.crawler.exception.MaxLengthExceededException;
 import org.codelibs.fess.crawler.exception.MultipleCrawlingAccessException;
 import org.codelibs.fess.crawler.filter.UrlFilter;
 import org.codelibs.fess.crawler.helper.MimeTypeHelper;
@@ -101,6 +100,10 @@ public class BoxDataStore extends AbstractDataStore {
     protected static final String EXCLUDE_PATTERN = "exclude_pattern";
     /** Parameter key for the number of threads to use for crawling. */
     protected static final String NUMBER_OF_THREADS = "number_of_threads";
+    /** Parameter key for how long to wait, in seconds, for the crawl to finish after every user has been queued. */
+    protected static final String THREAD_POOL_AWAIT_TIMEOUT = "thread_pool_await_timeout";
+    /** Default value, in seconds, of {@link #THREAD_POOL_AWAIT_TIMEOUT}. */
+    protected static final long DEFAULT_AWAIT_TIMEOUT = 60L;
     /** Parameter key for a term to filter users by. */
     protected static final String FILTER_TERM = "filter_term";
     /** Parameter key for roles applied to every document. */
@@ -264,34 +267,63 @@ public class BoxDataStore extends AbstractDataStore {
         if (logger.isDebugEnabled()) {
             logger.debug("crawling user folders.");
         }
-        final int numOfThread = Integer.parseInt(paramMap.getAsString(NUMBER_OF_THREADS, "1"));
         final String filterTerm = paramMap.getAsString(FILTER_TERM);
-        final BoxAclResolver aclResolver = new BoxAclResolver(client, config.defaultPermissions, config.companySharedLinkRole);
-        client.asSelf();
-        client.getUsers(filterTerm, info -> {
-            final BoxUser user = info.getResource();
-            final String userId = user.getID();
-            if (logger.isDebugEnabled()) {
-                logger.debug("crawling by {}", userId);
-            }
-            client.asUser(userId);
-            final BoxFolder folder = client.getRootFolder();
-            final ExecutorService executorService = newFixedThreadPool(numOfThread);
-            try {
-                client.getFiles(folder, userId, config.fields, file -> executorService.execute(
-                        () -> storeFile(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, client, aclResolver, file)));
-                if (logger.isDebugEnabled()) {
-                    logger.debug("shutting down executor..");
+        final long readInterval = getReadInterval(paramMap);
+        final BoxAclResolver aclResolver = new BoxAclResolver(config.defaultPermissions, config.companySharedLinkRole);
+        // A single pool serves the whole crawl. The previous implementation created and
+        // destroyed one pool per user, with its await applying per user, so anything still
+        // queued when one user's crawl ran long was dropped by shutdownNow() without a log line.
+        final ExecutorService executorService = newFixedThreadPool(getNumberOfThreads(paramMap));
+        try {
+            client.getUsers(filterTerm, info -> {
+                if (!alive) {
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("Stop requested. Skipping remaining users.");
+                    }
+                    return;
                 }
-                executorService.shutdown();
-                executorService.awaitTermination(60, TimeUnit.SECONDS);
-            } catch (final InterruptedException e) {
-                throw new InterruptedRuntimeException(e);
-            } finally {
-                executorService.shutdownNow();
+                final BoxUser user = info.getResource();
+                final String userId = user.getID();
+                if (logger.isDebugEnabled()) {
+                    logger.debug("crawling by {}", userId);
+                }
+                // Each user gets its own connection. asUser() used to mutate the shared
+                // connection while a previous user's worker threads could still be running,
+                // risking a request issued under the wrong identity.
+                final BoxClient userClient = client.forUser(userId);
+                final BoxFolder folder = userClient.getRootFolder();
+                userClient.getFiles(folder, config.fields, file -> {
+                    if (!alive) {
+                        return;
+                    }
+                    executorService.execute(() -> storeFile(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, userClient,
+                            aclResolver, file));
+                    if (readInterval > 0) {
+                        sleep(readInterval);
+                    }
+                });
+            });
+        } finally {
+            if (logger.isDebugEnabled()) {
+                logger.debug("shutting down executor..");
             }
-            client.asSelf();
-        });
+            executorService.shutdown();
+            try {
+                if (!executorService.awaitTermination(config.awaitTimeout, TimeUnit.SECONDS)) {
+                    // shutdownNow() only returns tasks that never started; it does not count
+                    // files whose storeFile() task was already running and got interrupted, so
+                    // this understates how many files were actually disrupted.
+                    final List<Runnable> pending = executorService.shutdownNow();
+                    logger.warn(
+                            "The crawler did not finish within {} seconds. {} queued-but-unstarted file(s) were dropped, and any "
+                                    + "file(s) still being processed were interrupted. Increase {} if this happens regularly.",
+                            config.awaitTimeout, pending.size(), THREAD_POOL_AWAIT_TIMEOUT);
+                }
+            } catch (final InterruptedException e) {
+                executorService.shutdownNow();
+                throw new InterruptedRuntimeException(e);
+            }
+        }
     }
 
     /**
@@ -309,6 +341,31 @@ public class BoxDataStore extends AbstractDataStore {
     }
 
     /**
+     * Returns the thread count, clamped to a sane range.
+     *
+     * @param paramMap The data store parameters.
+     * @return the number of crawler threads, at least 1
+     */
+    protected int getNumberOfThreads(final DataStoreParams paramMap) {
+        final int max = Runtime.getRuntime().availableProcessors() * 2;
+        int nThreads;
+        try {
+            nThreads = Integer.parseInt(paramMap.getAsString(NUMBER_OF_THREADS, "1"));
+        } catch (final NumberFormatException e) {
+            logger.warn("Invalid {}: {}. Falling back to 1.", NUMBER_OF_THREADS, paramMap.getAsString(NUMBER_OF_THREADS));
+            nThreads = 1;
+        }
+        if (nThreads < 1) {
+            return 1;
+        }
+        if (nThreads > max) {
+            logger.info("{} is capped at {} on this machine.", NUMBER_OF_THREADS, max);
+            return max;
+        }
+        return nThreads;
+    }
+
+    /**
      * Stores a single file in the index.
      *
      * @param dataConfig The data configuration.
@@ -317,7 +374,7 @@ public class BoxDataStore extends AbstractDataStore {
      * @param paramMap The data store parameters.
      * @param scriptMap The script mapping.
      * @param defaultDataMap The default data map.
-     * @param client The Box client.
+     * @param client The Box client scoped to the file's user, from {@link BoxClient#forUser(String)}.
      * @param aclResolver The resolver used to compute the file's search roles.
      * @param file The Box file to store.
      */
@@ -371,8 +428,13 @@ public class BoxDataStore extends AbstractDataStore {
             final Map<String, Object> fileMap = new HashMap<>();
 
             if (info.getSize() > config.maxSize) {
-                throw new MaxLengthExceededException(
-                        "The content length (" + info.getSize() + " byte) is over " + config.maxSize + " byte. The url is " + url);
+                // Over max_size is a deliberate skip, not a crawling error, so it must not
+                // be reported through failureUrl: that would pollute the failure log with
+                // files nobody asked to have indexed in the first place.
+                logger.info("Skipping {} because its size ({} byte) is over {} ({} byte).", info.getName(), info.getSize(), MAX_SIZE,
+                        config.maxSize);
+                crawlerStatsHelper.discard(statsKey);
+                return;
             }
 
             final String fileType = ComponentUtil.getFileTypeHelper().get(mimeType);
@@ -421,7 +483,7 @@ public class BoxDataStore extends AbstractDataStore {
             if (defaultDataMap.get(ComponentUtil.getFessConfig().getIndexFieldRole()) instanceof final List<?> roleTypeList) {
                 roleTypeList.stream().map(String.class::cast).forEach(baseRoles::add);
             }
-            fileMap.put(FILE_ROLES, aclResolver.getRoles(info, baseRoles));
+            fileMap.put(FILE_ROLES, aclResolver.getRoles(client, info, baseRoles));
 
             fileMap.put("api", new BoxFileAPI(file));
 
@@ -594,6 +656,7 @@ public class BoxDataStore extends AbstractDataStore {
         final UrlFilter urlFilter;
         final List<String> defaultPermissions;
         final String companySharedLinkRole;
+        final long awaitTimeout;
 
         /**
          * Constructs a new Config instance from the given parameters.
@@ -608,6 +671,7 @@ public class BoxDataStore extends AbstractDataStore {
             urlFilter = getUrlFilter(paramMap);
             defaultPermissions = getDefaultPermissions(paramMap);
             companySharedLinkRole = getCompanySharedLinkRole(paramMap);
+            awaitTimeout = getAwaitTimeout(paramMap);
         }
 
         private String[] getFields(final DataStoreParams paramMap) {
@@ -682,11 +746,26 @@ public class BoxDataStore extends AbstractDataStore {
             return ComponentUtil.getPermissionHelper().encode(value);
         }
 
+        private long getAwaitTimeout(final DataStoreParams paramMap) {
+            final String value = paramMap.getAsString(THREAD_POOL_AWAIT_TIMEOUT);
+            long timeout;
+            try {
+                timeout = StringUtil.isNotBlank(value) ? Long.parseLong(value) : DEFAULT_AWAIT_TIMEOUT;
+            } catch (final NumberFormatException e) {
+                logger.warn("Invalid {}: {}. Falling back to {}.", THREAD_POOL_AWAIT_TIMEOUT, value, DEFAULT_AWAIT_TIMEOUT);
+                timeout = DEFAULT_AWAIT_TIMEOUT;
+            }
+            // 0 or negative would make awaitTermination() return immediately, dropping every
+            // queued file without ever giving the executor a chance to finish.
+            return timeout < 1 ? 1 : timeout;
+        }
+
         @Override
         public String toString() {
             return "{fields=" + Arrays.toString(fields) + ",maxSize=" + maxSize + ",ignoreError=" + ignoreError + ",ignoreFolder="
                     + ignoreFolder + ",supportedMimeTypes=" + Arrays.toString(supportedMimeTypes) + ",urlFilter=" + urlFilter
-                    + ",defaultPermissions=" + defaultPermissions + ",companySharedLinkRole=" + companySharedLinkRole + "}";
+                    + ",defaultPermissions=" + defaultPermissions + ",companySharedLinkRole=" + companySharedLinkRole + ",awaitTimeout="
+                    + awaitTimeout + "}";
         }
     }
 

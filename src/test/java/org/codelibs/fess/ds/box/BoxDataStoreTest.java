@@ -160,6 +160,55 @@ public class BoxDataStoreTest extends UnitDsTestCase {
     }
 
     @Test
+    public void test_Config_defaultAwaitTimeout() {
+        final DataStoreParams paramMap = new DataStoreParams();
+        final TestableBoxDataStore testDataStore = new TestableBoxDataStore();
+        final Object config = testDataStore.createConfig(paramMap);
+
+        assertNotNull(config);
+        assertTrue(config.toString().contains("awaitTimeout=60}"));
+    }
+
+    @Test
+    public void test_Config_customAwaitTimeout() {
+        final DataStoreParams paramMap = new DataStoreParams();
+        paramMap.put("thread_pool_await_timeout", "120");
+        final TestableBoxDataStore testDataStore = new TestableBoxDataStore();
+        final Object config = testDataStore.createConfig(paramMap);
+
+        assertNotNull(config);
+        assertTrue(config.toString().contains("awaitTimeout=120}"));
+    }
+
+    @Test
+    public void test_Config_invalidAwaitTimeout() {
+        final DataStoreParams paramMap = new DataStoreParams();
+        paramMap.put("thread_pool_await_timeout", "invalid");
+        final TestableBoxDataStore testDataStore = new TestableBoxDataStore();
+        final Object config = testDataStore.createConfig(paramMap);
+
+        assertNotNull(config);
+        // Should fall back to default
+        assertTrue(config.toString().contains("awaitTimeout=60}"));
+    }
+
+    @Test
+    public void test_Config_zeroOrNegativeAwaitTimeout() {
+        final TestableBoxDataStore testDataStore = new TestableBoxDataStore();
+
+        final DataStoreParams zeroParamMap = new DataStoreParams();
+        zeroParamMap.put("thread_pool_await_timeout", "0");
+        // 0 would make awaitTermination() return immediately, dropping every queued file.
+        // awaitTimeout is the last field in toString(), so anchor on the closing brace to
+        // avoid "1" spuriously matching a value like "10".
+        assertTrue(testDataStore.createConfig(zeroParamMap).toString().contains("awaitTimeout=1}"));
+
+        final DataStoreParams negativeParamMap = new DataStoreParams();
+        negativeParamMap.put("thread_pool_await_timeout", "-5");
+        assertTrue(testDataStore.createConfig(negativeParamMap).toString().contains("awaitTimeout=1}"));
+    }
+
+    @Test
     public void test_defaultFields_containsEveryMappedField() {
         final List<String> fields = Arrays.asList(BoxDataStore.DEFAULT_FIELDS);
         // Every field storeFile maps must be requested. Box returns only the
@@ -215,6 +264,27 @@ public class BoxDataStoreTest extends UnitDsTestCase {
 
         assertNotNull(executor);
         executor.shutdown();
+    }
+
+    @Test
+    public void test_getNumberOfThreads_clampsToAvailableProcessors() {
+        final int max = Runtime.getRuntime().availableProcessors() * 2;
+        final DataStoreParams paramMap = new DataStoreParams();
+
+        paramMap.put("number_of_threads", "1");
+        assertEquals(1, dataStore.getNumberOfThreads(paramMap));
+
+        paramMap.put("number_of_threads", String.valueOf(max + 100));
+        assertEquals(max, dataStore.getNumberOfThreads(paramMap));
+
+        paramMap.put("number_of_threads", "0");
+        assertEquals(1, dataStore.getNumberOfThreads(paramMap));
+
+        paramMap.put("number_of_threads", "-5");
+        assertEquals(1, dataStore.getNumberOfThreads(paramMap));
+
+        paramMap.put("number_of_threads", "not a number");
+        assertEquals(1, dataStore.getNumberOfThreads(paramMap));
     }
 
     @Test

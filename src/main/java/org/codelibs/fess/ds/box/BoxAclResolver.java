@@ -67,9 +67,6 @@ public class BoxAclResolver {
     /** Cached folder identifier to search roles. */
     protected final Map<String, List<String>> folderRoleCache = new ConcurrentHashMap<>();
 
-    /** The client used to read collaborations. */
-    protected final BoxClient client;
-
     /** Roles applied to every document, already encoded. */
     protected final List<String> defaultPermissions;
 
@@ -79,12 +76,18 @@ public class BoxAclResolver {
     /**
      * Constructs a resolver.
      *
-     * @param client the Box client
+     * <p>This resolver no longer holds a client: each user now crawls through its own
+     * {@link BoxClient} instance, so the client that can read a folder's collaborations
+     * is only known at call time and is passed into {@link #getRoles(BoxClient, BoxFile.Info, List)}
+     * instead. The folder role cache is keyed by folder id alone, which is safe because
+     * folder ids are globally unique in Box (the sole exception, {@value #ROOT_FOLDER_ID},
+     * is always skipped as an ancestor) - so the first user able to read a folder populates
+     * the cache for every other user's crawl.</p>
+     *
      * @param defaultPermissions encoded roles applied to every document
      * @param companySharedLinkRole role for enterprise-wide shared links, or null to disable
      */
-    public BoxAclResolver(final BoxClient client, final List<String> defaultPermissions, final String companySharedLinkRole) {
-        this.client = client;
+    public BoxAclResolver(final List<String> defaultPermissions, final String companySharedLinkRole) {
         this.defaultPermissions = defaultPermissions;
         this.companySharedLinkRole = companySharedLinkRole;
     }
@@ -112,21 +115,23 @@ public class BoxAclResolver {
      * needs this folder retries instead of being permanently stuck with an
      * empty result.</p>
      *
+     * @param client the client to read the folder's collaborations with
      * @param folderId the folder identifier
      * @return the folder's search roles
      */
-    protected List<String> getFolderRoles(final String folderId) {
-        final List<String> roles = folderRoleCache.computeIfAbsent(folderId, this::loadFolderRoles);
+    protected List<String> getFolderRoles(final BoxClient client, final String folderId) {
+        final List<String> roles = folderRoleCache.computeIfAbsent(folderId, id -> loadFolderRoles(client, id));
         return roles != null ? roles : List.of();
     }
 
     /**
      * Reads a folder's collaborations from Box.
      *
+     * @param client the client to read the folder's collaborations with
      * @param folderId the folder identifier
      * @return the folder's search roles, or null if they could not be read
      */
-    protected List<String> loadFolderRoles(final String folderId) {
+    protected List<String> loadFolderRoles(final BoxClient client, final String folderId) {
         try {
             return toRoles(client.getFolderCollaborations(folderId));
         } catch (final Exception e) {
@@ -204,13 +209,15 @@ public class BoxAclResolver {
     /**
      * Resolves the effective search roles of a file.
      *
+     * @param client the client to read ancestor folder collaborations with; it must be
+     *        scoped to the same user the file's own collaborations are read as
      * @param info the file information; {@code path_collection}, {@code owned_by},
      *        {@code has_collaborations} and {@code shared_link} must have been requested
      * @param baseRoles roles supplied by the caller, typically the data store
      *        configuration's permissions
      * @return the effective search roles
      */
-    public List<String> getRoles(final BoxFile.Info info, final List<String> baseRoles) {
+    public List<String> getRoles(final BoxClient client, final BoxFile.Info info, final List<String> baseRoles) {
         final List<String> ownerRoles = getOwnerRoles(info);
 
         final List<String> ancestorRoles = new ArrayList<>();
@@ -218,7 +225,7 @@ public class BoxAclResolver {
         if (pathCollection != null) {
             for (final BoxFolder.Info ancestor : pathCollection) {
                 if (!ROOT_FOLDER_ID.equals(ancestor.getID())) {
-                    ancestorRoles.addAll(getFolderRoles(ancestor.getID()));
+                    ancestorRoles.addAll(getFolderRoles(client, ancestor.getID()));
                 }
             }
         }
