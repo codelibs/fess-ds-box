@@ -35,8 +35,6 @@ import com.box.sdk.BoxFile;
 import com.box.sdk.BoxFolder;
 import com.box.sdk.BoxSharedLink;
 import com.box.sdk.BoxUser;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
  * Resolves the effective search roles of a Box file.
@@ -55,7 +53,16 @@ public class BoxAclResolver {
 
     private static final Logger logger = LogManager.getLogger(BoxAclResolver.class);
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    /**
+     * The identifier Box uses for the current user's own "All Files" root.
+     *
+     * <p>Unlike every other folder id, {@code "0"} is not globally unique: it
+     * identifies a different physical folder for each impersonated user, yet
+     * every file's {@code path_collection} starts with it. Caching roles under
+     * this key would leak the first crawled user's root collaborations onto
+     * every other user's files, so it is always skipped as an ancestor.</p>
+     */
+    protected static final String ROOT_FOLDER_ID = "0";
 
     /** Cached folder identifier to search roles. */
     protected final Map<String, List<String>> folderRoleCache = new ConcurrentHashMap<>();
@@ -85,55 +92,46 @@ public class BoxAclResolver {
     /**
      * Returns whether a per-file collaboration lookup is required.
      *
-     * <p>The {@code has_collaborations} field is only present when it was asked
-     * for through {@code fields}. When it is absent or the payload cannot be
-     * parsed this returns true, so that a missing hint never silently drops a
-     * file's access control list.</p>
+     * <p>The flag is only populated when {@code has_collaborations} was requested
+     * through {@code fields}. A null flag therefore means "unknown", and this
+     * returns true so that a missing hint never silently drops a file's access
+     * control list.</p>
      *
-     * @param json the raw item JSON
+     * @param hasCollaborations the value reported by Box, or null if not requested
      * @return true if the file may carry its own collaborations
      */
-    static boolean hasCollaborations(final String json) {
-        if (StringUtil.isBlank(json)) {
-            return true;
-        }
-        try {
-            final JsonNode node = MAPPER.readTree(json).get("has_collaborations");
-            if (node == null || !node.isBoolean()) {
-                return true;
-            }
-            return node.asBoolean();
-        } catch (final Exception e) {
-            if (logger.isDebugEnabled()) {
-                logger.debug("Failed to read has_collaborations from {}", json, e);
-            }
-            return true;
-        }
+    static boolean hasCollaborations(final Boolean hasCollaborations) {
+        return hasCollaborations == null || hasCollaborations.booleanValue();
     }
 
     /**
      * Returns the search roles of a folder, reading it at most once.
      *
+     * <p>A failed lookup is not cached: {@link Map#computeIfAbsent} stores no
+     * mapping when the mapping function returns null, so the next file that
+     * needs this folder retries instead of being permanently stuck with an
+     * empty result.</p>
+     *
      * @param folderId the folder identifier
      * @return the folder's search roles
      */
     protected List<String> getFolderRoles(final String folderId) {
-        return folderRoleCache.computeIfAbsent(folderId, this::loadFolderRoles);
+        final List<String> roles = folderRoleCache.computeIfAbsent(folderId, this::loadFolderRoles);
+        return roles != null ? roles : List.of();
     }
 
     /**
      * Reads a folder's collaborations from Box.
      *
      * @param folderId the folder identifier
-     * @return the folder's search roles, or an empty list if they cannot be read
+     * @return the folder's search roles, or null if they could not be read
      */
     protected List<String> loadFolderRoles(final String folderId) {
         try {
             return toRoles(client.getFolderCollaborations(folderId));
         } catch (final Exception e) {
-            logger.warn("Failed to read collaborations of folder {}. Its documents will only inherit "
-                    + "the roles resolved from other sources.", folderId, e);
-            return List.of();
+            logger.warn("Failed to read collaborations of folder {}. Will retry the next time a file needs it.", folderId, e);
+            return null;
         }
     }
 
@@ -213,31 +211,24 @@ public class BoxAclResolver {
      * @return the effective search roles
      */
     public List<String> getRoles(final BoxFile.Info info, final List<String> baseRoles) {
-        final List<String> ownerRoles = new ArrayList<>();
-        final BoxUser.Info owner = info.getOwnedBy();
-        if (owner != null) {
-            final SystemHelper systemHelper = ComponentUtil.getSystemHelper();
-            ownerRoles.add(systemHelper.getSearchRoleByUser(owner.getID()));
-            if (StringUtil.isNotBlank(owner.getLogin())) {
-                ownerRoles.add(systemHelper.getSearchRoleByUser(owner.getLogin()));
-            }
-        }
+        final List<String> ownerRoles = getOwnerRoles(info);
 
         final List<String> ancestorRoles = new ArrayList<>();
         final List<BoxFolder.Info> pathCollection = info.getPathCollection();
         if (pathCollection != null) {
             for (final BoxFolder.Info ancestor : pathCollection) {
-                ancestorRoles.addAll(getFolderRoles(ancestor.getID()));
+                if (!ROOT_FOLDER_ID.equals(ancestor.getID())) {
+                    ancestorRoles.addAll(getFolderRoles(ancestor.getID()));
+                }
             }
         }
 
         List<String> fileRoles = List.of();
-        if (hasCollaborations(info.getJson())) {
+        if (hasCollaborations(info.getHasCollaborations())) {
             try {
                 fileRoles = toRoles(getFileCollaborations(info));
             } catch (final Exception e) {
-                logger.warn("Failed to read collaborations of file {}. Falling back to ancestor folders " + "and the owner.", info.getID(),
-                        e);
+                logger.warn("Failed to read collaborations of file {}. Falling back to ancestor folders and the owner.", info.getID(), e);
             }
         }
 
@@ -250,6 +241,25 @@ public class BoxAclResolver {
         }
 
         return merge(baseRoles, defaultPermissions, ownerRoles, ancestorRoles, fileRoles, sharedLinkRoles);
+    }
+
+    /**
+     * Resolves the search roles granted to a file's owner.
+     *
+     * @param info the file information
+     * @return the owner's search roles, or an empty list if there is no owner
+     */
+    protected List<String> getOwnerRoles(final BoxFile.Info info) {
+        final List<String> ownerRoles = new ArrayList<>();
+        final BoxUser.Info owner = info.getOwnedBy();
+        if (owner != null) {
+            final SystemHelper systemHelper = ComponentUtil.getSystemHelper();
+            ownerRoles.add(systemHelper.getSearchRoleByUser(owner.getID()));
+            if (StringUtil.isNotBlank(owner.getLogin())) {
+                ownerRoles.add(systemHelper.getSearchRoleByUser(owner.getLogin()));
+            }
+        }
+        return ownerRoles;
     }
 
     /**

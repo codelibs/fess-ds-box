@@ -111,6 +111,17 @@ public class BoxDataStore extends AbstractDataStore {
     protected static final String FILE_ROLES = "roles";
 
     /**
+     * Fields requested from the Box API. Box omits every field that is not asked
+     * for once an explicit field list is supplied, so this must cover everything
+     * the crawler maps.
+     */
+    protected static final String[] DEFAULT_FIELDS =
+            { "type", "id", "etag", "sha1", "name", "description", "size", "path_collection", "created_at", "modified_at", "trashed_at",
+                    "purged_at", "content_created_at", "content_modified_at", "created_by", "modified_by", "owned_by", "shared_link",
+                    "parent", "item_status", "sequence_id", "file_version", "version_number", "comment_count", "permissions", "tags",
+                    "lock", "extension", "is_package", "has_collaborations", "watermark_info", "collections", "representations" };
+
+    /**
      * Parameter keys that must never reach the script evaluation context.
      */
     protected static final String[] SENSITIVE_PARAMS =
@@ -319,7 +330,7 @@ public class BoxDataStore extends AbstractDataStore {
         paramMap.put(Constants.CRAWLER_STATS_KEY, statsKey);
         try {
             crawlerStatsHelper.begin(statsKey);
-            final BoxFile.Info info = file.getInfo();
+            final BoxFile.Info info = file.getInfo(config.fields);
             final String downloadURL = file.getDownloadURL().toExternalForm();
             if (logger.isDebugEnabled()) {
                 logger.debug("downloadURL: {}", downloadURL);
@@ -585,15 +596,15 @@ public class BoxDataStore extends AbstractDataStore {
             supportedMimeTypes = getSupportedMimeTypes(paramMap);
             urlFilter = getUrlFilter(paramMap);
             defaultPermissions = getDefaultPermissions(paramMap);
-            companySharedLinkRole = paramMap.getAsString(COMPANY_SHARED_LINK_ROLE, StringUtil.EMPTY);
+            companySharedLinkRole = getCompanySharedLinkRole(paramMap);
         }
 
         private String[] getFields(final DataStoreParams paramMap) {
             final String value = paramMap.getAsString(FIELDS);
-            if (value != null) {
+            if (StringUtil.isNotBlank(value)) {
                 return StreamUtil.split(value, ",").get(stream -> stream.map(String::trim).toArray(String[]::new));
             }
-            return null;
+            return DEFAULT_FIELDS;
         }
 
         private long getMaxSize(final DataStoreParams paramMap) {
@@ -652,10 +663,19 @@ public class BoxDataStore extends AbstractDataStore {
             return list;
         }
 
+        private String getCompanySharedLinkRole(final DataStoreParams paramMap) {
+            final String value = paramMap.getAsString(COMPANY_SHARED_LINK_ROLE, StringUtil.EMPTY);
+            if (StringUtil.isBlank(value)) {
+                return StringUtil.EMPTY;
+            }
+            return ComponentUtil.getPermissionHelper().encode(value);
+        }
+
         @Override
         public String toString() {
             return "{fields=" + Arrays.toString(fields) + ",maxSize=" + maxSize + ",ignoreError=" + ignoreError + ",ignoreFolder="
-                    + ignoreFolder + ",supportedMimeTypes=" + Arrays.toString(supportedMimeTypes) + ",urlFilter=" + urlFilter + "}";
+                    + ignoreFolder + ",supportedMimeTypes=" + Arrays.toString(supportedMimeTypes) + ",urlFilter=" + urlFilter
+                    + ",defaultPermissions=" + defaultPermissions + ",companySharedLinkRole=" + companySharedLinkRole + "}";
         }
     }
 
