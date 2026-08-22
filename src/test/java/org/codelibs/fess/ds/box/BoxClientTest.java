@@ -15,6 +15,7 @@
  */
 package org.codelibs.fess.ds.box;
 
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 
 import java.util.HashMap;
@@ -35,6 +36,7 @@ public class BoxClientTest extends UnitDsTestCase {
         return true;
     }
 
+    @Test
     public void test_initialization() {
         final BoxClient client = new BoxClient();
         final Map<String, Object> params = createValidParams();
@@ -44,6 +46,7 @@ public class BoxClientTest extends UnitDsTestCase {
         assertNotNull(client);
     }
 
+    @Test
     public void test_getBaseUrl_default() {
         final BoxClient client = new BoxClient();
         final Map<String, Object> params = createValidParams();
@@ -60,6 +63,7 @@ public class BoxClientTest extends UnitDsTestCase {
         }
     }
 
+    @Test
     public void test_getBaseUrl_custom() {
         final BoxClient client = new BoxClient();
         final Map<String, Object> params = createValidParams();
@@ -77,6 +81,7 @@ public class BoxClientTest extends UnitDsTestCase {
         }
     }
 
+    @Test
     public void test_init_missingClientId() {
         final BoxClient client = new BoxClient();
         final Map<String, Object> params = createValidParams();
@@ -93,6 +98,7 @@ public class BoxClientTest extends UnitDsTestCase {
         }
     }
 
+    @Test
     public void test_init_missingClientSecret() {
         final BoxClient client = new BoxClient();
         final Map<String, Object> params = createValidParams();
@@ -109,6 +115,7 @@ public class BoxClientTest extends UnitDsTestCase {
         }
     }
 
+    @Test
     public void test_init_missingPublicKeyId() {
         final BoxClient client = new BoxClient();
         final Map<String, Object> params = createValidParams();
@@ -125,6 +132,7 @@ public class BoxClientTest extends UnitDsTestCase {
         }
     }
 
+    @Test
     public void test_init_missingPrivateKey() {
         final BoxClient client = new BoxClient();
         final Map<String, Object> params = createValidParams();
@@ -141,6 +149,7 @@ public class BoxClientTest extends UnitDsTestCase {
         }
     }
 
+    @Test
     public void test_init_missingPassphrase() {
         final BoxClient client = new BoxClient();
         final Map<String, Object> params = createValidParams();
@@ -157,6 +166,7 @@ public class BoxClientTest extends UnitDsTestCase {
         }
     }
 
+    @Test
     public void test_init_missingEnterpriseId() {
         final BoxClient client = new BoxClient();
         final Map<String, Object> params = createValidParams();
@@ -173,6 +183,7 @@ public class BoxClientTest extends UnitDsTestCase {
         }
     }
 
+    @Test
     public void test_close() {
         final BoxClient client = new BoxClient();
         // close should not throw exception even if not initialized

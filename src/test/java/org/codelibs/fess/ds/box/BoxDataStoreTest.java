@@ -15,6 +15,7 @@
  */
 package org.codelibs.fess.ds.box;
 
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 
 import java.io.ByteArrayInputStream;
@@ -69,10 +70,12 @@ public class BoxDataStoreTest extends UnitDsTestCase {
         super.tearDown(testInfo);
     }
 
+    @Test
     public void test_getName() {
         assertEquals("Box", dataStore.getName());
     }
 
+    @Test
     public void test_Config_defaultValues() {
         final DataStoreParams paramMap = new DataStoreParams();
         final TestableBoxDataStore testDataStore = new TestableBoxDataStore();
@@ -86,6 +89,7 @@ public class BoxDataStoreTest extends UnitDsTestCase {
         assertTrue(config.toString().contains("supportedMimeTypes=[.*]"));
     }
 
+    @Test
     public void test_Config_customMaxSize() {
         final DataStoreParams paramMap = new DataStoreParams();
         paramMap.put("max_size", "20000000");
@@ -96,6 +100,7 @@ public class BoxDataStoreTest extends UnitDsTestCase {
         assertTrue(config.toString().contains("maxSize=20000000"));
     }
 
+    @Test
     public void test_Config_invalidMaxSize() {
         final DataStoreParams paramMap = new DataStoreParams();
         paramMap.put("max_size", "invalid");
@@ -107,6 +112,7 @@ public class BoxDataStoreTest extends UnitDsTestCase {
         assertTrue(config.toString().contains("maxSize=10000000"));
     }
 
+    @Test
     public void test_Config_customFields() {
         final DataStoreParams paramMap = new DataStoreParams();
         paramMap.put("fields", "id,name,size");
@@ -117,6 +123,7 @@ public class BoxDataStoreTest extends UnitDsTestCase {
         assertTrue(config.toString().contains("fields=[id, name, size]"));
     }
 
+    @Test
     public void test_Config_ignoreError() {
         final DataStoreParams paramMap = new DataStoreParams();
         paramMap.put("ignore_error", "false");
@@ -127,6 +134,7 @@ public class BoxDataStoreTest extends UnitDsTestCase {
         assertTrue(config.toString().contains("ignoreError=false"));
     }
 
+    @Test
     public void test_Config_ignoreFolder() {
         final DataStoreParams paramMap = new DataStoreParams();
         paramMap.put("ignore_folder", "false");
@@ -137,6 +145,7 @@ public class BoxDataStoreTest extends UnitDsTestCase {
         assertTrue(config.toString().contains("ignoreFolder=false"));
     }
 
+    @Test
     public void test_Config_supportedMimeTypes() {
         final DataStoreParams paramMap = new DataStoreParams();
         paramMap.put("supported_mimetypes", "application/pdf,text/plain");
@@ -147,6 +156,7 @@ public class BoxDataStoreTest extends UnitDsTestCase {
         assertTrue(config.toString().contains("supportedMimeTypes=[application/pdf, text/plain]"));
     }
 
+    @Test
     public void test_getBaseUrl() {
         final MockBoxClient mockClient = new MockBoxClient();
         mockClient.setBaseUrl("https://app.box.com");
@@ -157,6 +167,7 @@ public class BoxDataStoreTest extends UnitDsTestCase {
         assertEquals("https://custom.box.com", mockClient.getBaseUrl());
     }
 
+    @Test
     public void test_getBoxNoteContents() throws Exception {
         final String jsonContent = "{\"atext\":{\"text\":\"This is a test box note content\"}}";
         final InputStream inputStream = new ByteArrayInputStream(jsonContent.getBytes(StandardCharsets.UTF_8));
@@ -167,6 +178,7 @@ public class BoxDataStoreTest extends UnitDsTestCase {
         assertEquals("This is a test box note content", content);
     }
 
+    @Test
     public void test_newFixedThreadPool() {
         final TestableBoxDataStore testDataStore = new TestableBoxDataStore();
         final java.util.concurrent.ExecutorService executor = testDataStore.callNewFixedThreadPool(4);
@@ -175,6 +187,7 @@ public class BoxDataStoreTest extends UnitDsTestCase {
         executor.shutdown();
     }
 
+    @Test
     public void test_storeData() {
         // need src/test/resources/config.json
         final Map<String, String> config = getConfig();
