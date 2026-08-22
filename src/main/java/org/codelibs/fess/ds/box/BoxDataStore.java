@@ -38,13 +38,13 @@ import org.codelibs.core.exception.InterruptedRuntimeException;
 import org.codelibs.core.io.ResourceUtil;
 import org.codelibs.core.lang.StringUtil;
 import org.codelibs.core.stream.StreamUtil;
-import org.codelibs.curl.Curl;
 import org.codelibs.fess.Constants;
 import org.codelibs.fess.app.service.FailureUrlService;
 import org.codelibs.fess.crawler.exception.CrawlingAccessException;
 import org.codelibs.fess.crawler.exception.MaxLengthExceededException;
 import org.codelibs.fess.crawler.exception.MultipleCrawlingAccessException;
 import org.codelibs.fess.crawler.filter.UrlFilter;
+import org.codelibs.fess.crawler.helper.MimeTypeHelper;
 import org.codelibs.fess.ds.AbstractDataStore;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.entity.DataStoreParams;
@@ -336,9 +336,16 @@ public class BoxDataStore extends AbstractDataStore {
                 logger.debug("downloadURL: {}", downloadURL);
                 logger.debug("info: {}", info.getJson());
             }
-            final String mimeType = getFileMimeType(downloadURL);
+            final String mimeType = getFileMimeType(info);
             if (Stream.of(config.supportedMimeTypes).noneMatch(mimeType::matches)) {
-                if (logger.isDebugEnabled()) {
+                // application/octet-stream is the fallback when MimeTypeHelperImpl cannot
+                // determine the MIME type from the filename or content
+                if ("application/octet-stream".equals(mimeType)) {
+                    logger.warn(
+                            "The MIME type of {} could not be determined from its name, so it was "
+                                    + "treated as {} and did not match supported_mimetypes. The file was not indexed.",
+                            info.getName(), mimeType);
+                } else if (logger.isDebugEnabled()) {
                     logger.debug("{} is not an indexing target.", mimeType);
                 }
                 crawlerStatsHelper.discard(statsKey);
@@ -527,13 +534,17 @@ public class BoxDataStore extends AbstractDataStore {
     }
 
     /**
-     * Retrieves the MIME type of a file from its download URL.
+     * Resolves the MIME type of a file from its name.
      *
-     * @param downloadURL The download URL.
+     * <p>This used to issue an HTTP HEAD against the download URL for every single
+     * file, which doubled the request count and ignored the configured proxy.</p>
+     *
+     * @param info The file information.
      * @return The MIME type.
      */
-    protected String getFileMimeType(final String downloadURL) {
-        return Curl.head(downloadURL).execute().getHeaderValue("content-type");
+    protected String getFileMimeType(final BoxFile.Info info) {
+        final MimeTypeHelper mimeTypeHelper = ComponentUtil.getComponent(MimeTypeHelper.class);
+        return mimeTypeHelper.getContentType(null, info.getName());
     }
 
     /**

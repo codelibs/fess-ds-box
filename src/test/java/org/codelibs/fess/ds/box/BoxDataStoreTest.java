@@ -24,8 +24,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
@@ -155,6 +157,21 @@ public class BoxDataStoreTest extends UnitDsTestCase {
 
         assertNotNull(config);
         assertTrue(config.toString().contains("supportedMimeTypes=[application/pdf, text/plain]"));
+    }
+
+    @Test
+    public void test_defaultFields_containsEveryMappedField() {
+        final List<String> fields = Arrays.asList(BoxDataStore.DEFAULT_FIELDS);
+        // Every field storeFile maps must be requested. Box returns only the
+        // fields asked for, so dropping one turns its mapped value null with
+        // no error to show for it.
+        for (final String required : new String[] { "type", "id", "etag", "sha1", "name", "description", "size", "path_collection",
+                "created_at", "modified_at", "trashed_at", "purged_at", "content_created_at", "content_modified_at", "created_by",
+                "modified_by", "owned_by", "shared_link", "parent", "item_status", "sequence_id", "file_version", "version_number",
+                "comment_count", "permissions", "tags", "lock", "extension", "is_package", "has_collaborations", "watermark_info",
+                "collections", "representations" }) {
+            assertTrue(required + " must be requested via fields", fields.contains(required));
+        }
     }
 
     @Test
