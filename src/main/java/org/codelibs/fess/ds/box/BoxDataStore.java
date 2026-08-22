@@ -52,6 +52,7 @@ import org.codelibs.fess.exception.DataStoreCrawlingException;
 import org.codelibs.fess.helper.CrawlerStatsHelper;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsAction;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsKeyObject;
+import org.codelibs.fess.helper.PermissionHelper;
 import org.codelibs.fess.helper.SystemHelper;
 import org.codelibs.fess.opensearch.config.exentity.DataConfig;
 import org.codelibs.fess.util.ComponentUtil;
@@ -102,6 +103,12 @@ public class BoxDataStore extends AbstractDataStore {
     protected static final String NUMBER_OF_THREADS = "number_of_threads";
     /** Parameter key for a term to filter users by. */
     protected static final String FILTER_TERM = "filter_term";
+    /** Parameter key for roles applied to every document. */
+    protected static final String DEFAULT_PERMISSIONS = "default_permissions";
+    /** Parameter key for the role granted to enterprise-wide shared links. */
+    protected static final String COMPANY_SHARED_LINK_ROLE = "company_shared_link_role";
+    /** Key for the file's search roles. */
+    protected static final String FILE_ROLES = "roles";
 
     /**
      * Parameter keys that must never reach the script evaluation context.
@@ -248,6 +255,7 @@ public class BoxDataStore extends AbstractDataStore {
         }
         final int numOfThread = Integer.parseInt(paramMap.getAsString(NUMBER_OF_THREADS, "1"));
         final String filterTerm = paramMap.getAsString(FILTER_TERM);
+        final BoxAclResolver aclResolver = new BoxAclResolver(client, config.defaultPermissions, config.companySharedLinkRole);
         client.asSelf();
         client.getUsers(filterTerm, info -> {
             final BoxUser user = info.getResource();
@@ -259,8 +267,8 @@ public class BoxDataStore extends AbstractDataStore {
             final BoxFolder folder = client.getRootFolder();
             final ExecutorService executorService = newFixedThreadPool(numOfThread);
             try {
-                client.getFiles(folder, userId, config.fields, file -> executorService
-                        .execute(() -> storeFile(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, client, file)));
+                client.getFiles(folder, userId, config.fields, file -> executorService.execute(
+                        () -> storeFile(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, client, aclResolver, file)));
                 if (logger.isDebugEnabled()) {
                     logger.debug("shutting down executor..");
                 }
@@ -299,11 +307,12 @@ public class BoxDataStore extends AbstractDataStore {
      * @param scriptMap The script mapping.
      * @param defaultDataMap The default data map.
      * @param client The Box client.
+     * @param aclResolver The resolver used to compute the file's search roles.
      * @param file The Box file to store.
      */
     protected void storeFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final Config config,
             final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
-            final BoxClient client, final BoxFile file) {
+            final BoxClient client, final BoxAclResolver aclResolver, final BoxFile file) {
         final CrawlerStatsHelper crawlerStatsHelper = ComponentUtil.getCrawlerStatsHelper();
         final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
         final StatsKeyObject statsKey = new StatsKeyObject(file.getID());
@@ -389,6 +398,12 @@ public class BoxDataStore extends AbstractDataStore {
             // fileMap.put(FILE_METADATA, file.getMetadata());
             fileMap.put(FILE_COLLECTIONS, info.getCollections());
             fileMap.put(FILE_REPRESENTATIONS, info.getRepresentations());
+
+            final List<String> baseRoles = new ArrayList<>();
+            if (defaultDataMap.get(ComponentUtil.getFessConfig().getIndexFieldRole()) instanceof final List<?> roleTypeList) {
+                roleTypeList.stream().map(String.class::cast).forEach(baseRoles::add);
+            }
+            fileMap.put(FILE_ROLES, aclResolver.getRoles(info, baseRoles));
 
             fileMap.put("api", new BoxFileAPI(file));
 
@@ -555,6 +570,8 @@ public class BoxDataStore extends AbstractDataStore {
         final boolean ignoreError;
         final String[] supportedMimeTypes;
         final UrlFilter urlFilter;
+        final List<String> defaultPermissions;
+        final String companySharedLinkRole;
 
         /**
          * Constructs a new Config instance from the given parameters.
@@ -567,6 +584,8 @@ public class BoxDataStore extends AbstractDataStore {
             ignoreError = isIgnoreError(paramMap);
             supportedMimeTypes = getSupportedMimeTypes(paramMap);
             urlFilter = getUrlFilter(paramMap);
+            defaultPermissions = getDefaultPermissions(paramMap);
+            companySharedLinkRole = paramMap.getAsString(COMPANY_SHARED_LINK_ROLE, StringUtil.EMPTY);
         }
 
         private String[] getFields(final DataStoreParams paramMap) {
@@ -619,6 +638,18 @@ public class BoxDataStore extends AbstractDataStore {
                 logger.debug("urlFilter: {}", urlFilter);
             }
             return urlFilter;
+        }
+
+        private List<String> getDefaultPermissions(final DataStoreParams paramMap) {
+            final String value = paramMap.getAsString(DEFAULT_PERMISSIONS, StringUtil.EMPTY);
+            if (StringUtil.isBlank(value)) {
+                return List.of();
+            }
+            final PermissionHelper permissionHelper = ComponentUtil.getPermissionHelper();
+            final List<String> list = new ArrayList<>();
+            StreamUtil.split(value, ",")
+                    .of(stream -> stream.filter(StringUtil::isNotBlank).map(permissionHelper::encode).forEach(list::add));
+            return list;
         }
 
         @Override

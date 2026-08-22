@@ -19,6 +19,7 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.net.Proxy;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.function.Consumer;
@@ -38,6 +39,7 @@ import org.codelibs.fess.exception.DataStoreException;
 import com.box.sdk.BoxAPIConnection;
 import com.box.sdk.BoxAPIException;
 import com.box.sdk.BoxAPIResponseException;
+import com.box.sdk.BoxCollaboration;
 import com.box.sdk.BoxConfig;
 import com.box.sdk.BoxDeveloperEditionAPIConnection;
 import com.box.sdk.BoxFile;
@@ -247,6 +249,16 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
      */
     public BoxFolder getFolder(final String folderId) {
         return new BoxFolder(connection, folderId);
+    }
+
+    /**
+     * Gets the collaborations of a folder.
+     *
+     * @param folderId the ID of the folder
+     * @return the folder's collaborations
+     */
+    public Collection<BoxCollaboration.Info> getFolderCollaborations(final String folderId) {
+        return getFolder(folderId).getCollaborations();
     }
 
     /**
