@@ -26,6 +26,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codelibs.core.lang.StringUtil;
+import org.codelibs.fess.ds.box.BoxDataStore.DocumentQuality;
 import org.codelibs.fess.helper.SystemHelper;
 import org.codelibs.fess.util.ComponentUtil;
 
@@ -120,7 +121,11 @@ public class BoxAclResolver {
      * @return the folder's search roles
      */
     protected List<String> getFolderRoles(final BoxClient client, final String folderId) {
-        final List<String> roles = folderRoleCache.computeIfAbsent(folderId, id -> loadFolderRoles(client, id));
+        return getFolderRoles(client, folderId, null);
+    }
+
+    protected List<String> getFolderRoles(final BoxClient client, final String folderId, final DocumentQuality quality) {
+        final List<String> roles = folderRoleCache.computeIfAbsent(folderId, id -> loadFolderRoles(client, id, quality));
         return roles != null ? roles : List.of();
     }
 
@@ -132,10 +137,25 @@ public class BoxAclResolver {
      * @return the folder's search roles, or null if they could not be read
      */
     protected List<String> loadFolderRoles(final BoxClient client, final String folderId) {
+        return loadFolderRoles(client, folderId, null);
+    }
+
+    /**
+     * Reads a folder's collaborations from Box.
+     *
+     * @param client the client to read the folder's collaborations with
+     * @param folderId the folder identifier
+     * @param quality optional degradation tracker; if collaboration lookup fails, {@code quality.aclDegraded} is set to true
+     * @return the folder's search roles, or null if they could not be read
+     */
+    protected List<String> loadFolderRoles(final BoxClient client, final String folderId, final DocumentQuality quality) {
         try {
             return toRoles(client.getFolderCollaborations(folderId));
         } catch (final Exception e) {
             logger.warn("Failed to read collaborations of folder {}. Will retry the next time a file needs it.", folderId, e);
+            if (quality != null) {
+                quality.aclDegraded = true;
+            }
             return null;
         }
     }
@@ -218,6 +238,20 @@ public class BoxAclResolver {
      * @return the effective search roles
      */
     public List<String> getRoles(final BoxClient client, final BoxFile.Info info, final List<String> baseRoles) {
+        return getRoles(client, info, baseRoles, null);
+    }
+
+    /**
+     * Resolves the search roles granted to a file.
+     *
+     * @param client the Box client
+     * @param info the file information
+     * @param baseRoles default roles to include
+     * @param quality optional degradation tracker; if collaboration lookup fails, {@code quality.aclDegraded} is set to true
+     * @return the file's resolved search roles
+     */
+    protected List<String> getRoles(final BoxClient client, final BoxFile.Info info, final List<String> baseRoles,
+            final DocumentQuality quality) {
         final List<String> ownerRoles = getOwnerRoles(info);
 
         final List<String> ancestorRoles = new ArrayList<>();
@@ -225,7 +259,7 @@ public class BoxAclResolver {
         if (pathCollection != null) {
             for (final BoxFolder.Info ancestor : pathCollection) {
                 if (!ROOT_FOLDER_ID.equals(ancestor.getID())) {
-                    ancestorRoles.addAll(getFolderRoles(client, ancestor.getID()));
+                    ancestorRoles.addAll(getFolderRoles(client, ancestor.getID(), quality));
                 }
             }
         }
@@ -236,6 +270,9 @@ public class BoxAclResolver {
                 fileRoles = toRoles(getFileCollaborations(info));
             } catch (final Exception e) {
                 logger.warn("Failed to read collaborations of file {}. Falling back to ancestor folders and the owner.", info.getID(), e);
+                if (quality != null) {
+                    quality.aclDegraded = true;
+                }
             }
         }
 

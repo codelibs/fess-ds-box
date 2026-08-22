@@ -63,6 +63,14 @@ public class BoxAclResolverTest {
         int fileCollaborationLookups;
         /** The client most recently handed to {@link #loadFolderRoles}, so tests can pin R17's contract. */
         BoxClient lastClient;
+        /** When true, {@link #getFileCollaborations} throws instead of returning an empty list. */
+        boolean failFileCollaborations;
+        /**
+         * When true, the 3-arg {@link #loadFolderRoles(BoxClient, String, BoxDataStore.DocumentQuality)}
+         * override falls through to the real (unstubbed) implementation instead of delegating to the
+         * 2-arg testing stub, so its own try/catch - the thing round 3 added - actually runs.
+         */
+        boolean failFolderRoles;
 
         StubResolver(final Map<String, List<String>> folderRoles, final List<String> defaultPermissions,
                 final String companySharedLinkRole) {
@@ -78,6 +86,14 @@ public class BoxAclResolverTest {
         }
 
         @Override
+        protected List<String> loadFolderRoles(final BoxClient client, final String folderId, final BoxDataStore.DocumentQuality quality) {
+            if (failFolderRoles) {
+                return super.loadFolderRoles(client, folderId, quality);
+            }
+            return loadFolderRoles(client, folderId);
+        }
+
+        @Override
         protected List<String> getOwnerRoles(final BoxFile.Info info) {
             return ownerRoles;
         }
@@ -85,6 +101,9 @@ public class BoxAclResolverTest {
         @Override
         protected Collection<BoxCollaboration.Info> getFileCollaborations(final BoxFile.Info info) {
             fileCollaborationLookups++;
+            if (failFileCollaborations) {
+                throw new RuntimeException("simulated file collaboration lookup failure");
+            }
             return List.of();
         }
 
@@ -161,6 +180,44 @@ public class BoxAclResolverTest {
         resolver.getRoles(null, info("{\"has_collaborations\":true}"), List.of());
 
         assertEquals(1, resolver.fileCollaborationLookups);
+    }
+
+    @Test
+    public void test_getRoles_fileCollaborationLookupFailure_setsAclDegraded() {
+        // Every pre-existing getRoles test above goes through the 3-arg null-quality overload;
+        // this is the first to drive the real 4-arg overload with a live DocumentQuality.
+        final StubResolver resolver = new StubResolver(Map.of(), List.of(), null);
+        resolver.failFileCollaborations = true;
+        final BoxFile.Info info = info("{\"has_collaborations\":true}");
+        final BoxDataStore.DocumentQuality quality = new BoxDataStore.DocumentQuality();
+
+        final List<String> roles = resolver.getRoles(null, info, List.of(), quality);
+
+        assertTrue(quality.aclDegraded, "a failed file collaboration lookup must degrade the document");
+        assertEquals(List.of(), roles, "the file falls back to owner and ancestor roles alone");
+    }
+
+    @Test
+    public void test_getRoles_ancestorFolderCollaborationLookupFailure_setsAclDegraded() {
+        // Unlike the other tests in this file, this one must NOT let StubResolver's loadFolderRoles
+        // override swallow the failure: failFolderRoles routes through the real, unstubbed
+        // loadFolderRoles(client, folderId, quality), whose own try/catch is what round 3 added.
+        final StubResolver resolver = new StubResolver(Map.of(), List.of(), null);
+        resolver.failFolderRoles = true;
+        final BoxClient client = new BoxClient() {
+            @Override
+            public Collection<BoxCollaboration.Info> getFolderCollaborations(final String folderId) {
+                throw new RuntimeException("simulated folder collaboration lookup failure");
+            }
+        };
+        final BoxFile.Info info =
+                info("{\"has_collaborations\":false,\"path_collection\":{\"total_count\":1,\"entries\":[{\"id\":\"100\"}]}}");
+        final BoxDataStore.DocumentQuality quality = new BoxDataStore.DocumentQuality();
+
+        final List<String> roles = resolver.getRoles(client, info, List.of(), quality);
+
+        assertTrue(quality.aclDegraded, "a failed ancestor folder lookup must degrade the document");
+        assertEquals(List.of(), roles, "the failed folder contributes no roles");
     }
 
     @Test

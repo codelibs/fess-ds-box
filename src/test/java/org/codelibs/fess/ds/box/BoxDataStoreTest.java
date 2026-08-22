@@ -22,26 +22,39 @@ import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.MalformedURLException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codelibs.fess.crawler.exception.CrawlingAccessException;
 import org.codelibs.fess.crawler.extractor.ExtractorFactory;
 import org.codelibs.fess.crawler.extractor.impl.TikaExtractor;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.entity.DataStoreParams;
+import org.codelibs.fess.helper.CrawlerStatsHelper;
 import org.codelibs.fess.helper.FileTypeHelper;
+import org.codelibs.fess.helper.SystemHelper;
 import org.codelibs.fess.opensearch.config.exentity.DataConfig;
 import org.codelibs.fess.util.ComponentUtil;
 import org.codelibs.fess.ds.box.UnitDsTestCase;
 
 import com.box.sdk.BoxCollaboration;
+import com.box.sdk.BoxFile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -358,6 +371,155 @@ public class BoxDataStoreTest extends UnitDsTestCase {
         assertFalse(BoxDataStore.BoxFileAPI.isEffectiveCollaboration(BoxCollaboration.Status.ACCEPTED, null));
     }
 
+    @Test
+    public void test_markCrawled_returnsTrueOnlyOnce() {
+        final Set<String> crawledIds = ConcurrentHashMap.newKeySet();
+
+        assertTrue(dataStore.markCrawled(crawledIds, "111"));
+        assertFalse(dataStore.markCrawled(crawledIds, "111"));
+        assertFalse(dataStore.markCrawled(crawledIds, "111"));
+        assertTrue(dataStore.markCrawled(crawledIds, "222"));
+    }
+
+    @Test
+    public void test_markCrawled_isThreadSafe() throws Exception {
+        final int threads = 16;
+        final int rounds = 50;
+        final ExecutorService pool = Executors.newFixedThreadPool(threads);
+        try {
+            for (int round = 0; round < rounds; round++) {
+                final Set<String> crawledIds = ConcurrentHashMap.newKeySet();
+                final CountDownLatch start = new CountDownLatch(1);
+                final AtomicInteger accepted = new AtomicInteger();
+                for (int i = 0; i < threads; i++) {
+                    pool.execute(() -> {
+                        try {
+                            start.await();
+                        } catch (final InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            return;
+                        }
+                        if (dataStore.markCrawled(crawledIds, "same")) {
+                            accepted.incrementAndGet();
+                        }
+                    });
+                }
+                start.countDown();
+                Thread.sleep(10);
+                org.junit.jupiter.api.Assertions.assertEquals(1, accepted.get(), "round " + round + ": exactly one thread must win");
+            }
+            pool.shutdown();
+            assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    public void test_releaseCrawled_allowsReCrawl() {
+        final Set<String> crawledIds = ConcurrentHashMap.newKeySet();
+
+        // First crawl succeeds
+        assertTrue(dataStore.markCrawled(crawledIds, "111"));
+        // Second attempt fails (already claimed)
+        assertFalse(dataStore.markCrawled(crawledIds, "111"));
+        // Release it
+        dataStore.releaseCrawled(crawledIds, "111");
+        // Now it can be crawled again
+        assertTrue(dataStore.markCrawled(crawledIds, "111"));
+    }
+
+    @Test
+    public void test_releaseCrawled_isHarmlessIfNeverClaimed() {
+        final Set<String> crawledIds = ConcurrentHashMap.newKeySet();
+
+        // Release an id that was never claimed — must be harmless
+        dataStore.releaseCrawled(crawledIds, "never-claimed");
+        // Should be able to claim it normally
+        assertTrue(dataStore.markCrawled(crawledIds, "never-claimed"));
+    }
+
+    @Test
+    public void test_getFileContents_swallowedExtractionFailure_setsContentDegraded() {
+        // ignoreError=true makes the guard short-circuit before FessConfig is ever consulted,
+        // so this drives the real catch branch of getFileContents without a container.
+        final BoxFile file = new BoxFile(null, "file-1");
+        final BoxFile.Info info = file.new Info("{\"name\":\"test.txt\"}");
+        final BoxDataStore.DocumentQuality quality = new BoxDataStore.DocumentQuality();
+        final ThrowingContentBoxClient client = new ThrowingContentBoxClient();
+
+        final String content =
+                dataStore.getFileContents(client, file, info, "https://app.box.com/download/file-1", "text/plain", true, quality);
+
+        assertEquals("", content);
+        assertTrue("a swallowed extraction failure must degrade the document's content", quality.contentDegraded);
+    }
+
+    @Test
+    public void test_getFileContents_genuinelyEmptyBoxNote_leavesContentDegradedFalse() throws Exception {
+        // A .boxnote whose payload has neither "doc" nor "atext" parses to an empty string
+        // without throwing: this is the constraint that stops every empty file being
+        // reprocessed once per collaborator.
+        final BoxFile file = new BoxFile(null, "file-1");
+        final BoxFile.Info info = file.new Info("{\"name\":\"empty.boxnote\"}");
+        final BoxDataStore.DocumentQuality quality = new BoxDataStore.DocumentQuality();
+        final EmptyBoxNoteBoxClient client = new EmptyBoxNoteBoxClient();
+
+        final String content =
+                dataStore.getFileContents(client, file, info, "https://app.box.com/download/file-1", "text/plain", true, quality);
+
+        assertEquals("", content);
+        assertFalse("a genuinely empty extraction must not be treated as degraded", quality.contentDegraded);
+    }
+
+    @Test
+    public void test_storeFile_swallowedContentFailure_indexesDegradedDocumentAndReleasesClaim() {
+        // Reaching storeFile's success path needs a few container components that convention.xml
+        // does not auto-provide in this narrow test classpath (confirmed by probing
+        // ComponentUtil.getComponent(MimeTypeHelper.class) and ComponentUtil.getCrawlerStatsHelper(),
+        // both of which throw ComponentNotFoundException here). FessConfig, used at the baseRoles
+        // line, *is* auto-provided (FessConfigImpl loads fess_config.properties bundled in the fess
+        // jar dependency). MimeTypeHelper is avoided by overriding getFileMimeType in
+        // RecordingBoxDataStore; CrawlerStatsHelper and SystemHelper (CrawlerStatsHelper.done()'s
+        // error-logging path calls ComponentUtil.getSystemHelper() for a timestamp) are registered
+        // as bare instances - neither needs its @PostConstruct init() for what this test exercises.
+        // Everything else - Config, BoxAclResolver, the release wiring itself - is real, unstubbed
+        // production code.
+        ComponentUtil.register(new SystemHelper(), "systemHelper");
+        final CrawlerStatsHelper crawlerStatsHelper = new CrawlerStatsHelper();
+        crawlerStatsHelper.init();
+        ComponentUtil.register(crawlerStatsHelper, "crawlerStatsHelper");
+        ComponentUtil.register(new FileTypeHelper(), "fileTypeHelper");
+
+        final RecordingBoxDataStore recordingStore = new RecordingBoxDataStore();
+        final Set<String> crawledIds = ConcurrentHashMap.newKeySet();
+        recordingStore.markCrawled(crawledIds, "file-1");
+
+        final String infoJson = "{\"type\":\"file\",\"id\":\"file-1\",\"name\":\"test.txt\",\"size\":100,"
+                + "\"has_collaborations\":false,\"path_collection\":{\"total_count\":0,\"entries\":[]}}";
+        final FakeBoxFile file = new FakeBoxFile("file-1", infoJson);
+        final ThrowingContentBoxClient client = new ThrowingContentBoxClient();
+        final BoxAclResolver aclResolver = new BoxAclResolver(List.of(), null);
+        final DataConfig dataConfig = new DataConfig();
+        final DataStoreParams paramMap = new DataStoreParams();
+        final BoxDataStore.Config config = new BoxDataStore.Config(paramMap);
+        final Map<String, String> scriptMap = new HashMap<>();
+        final Map<String, Object> defaultDataMap = new HashMap<>();
+        final List<Map<String, Object>> stored = new ArrayList<>();
+        final IndexUpdateCallback callback = new TestCallback() {
+            @Override
+            void test(final DataStoreParams p, final Map<String, Object> dataMap) {
+                stored.add(dataMap);
+            }
+        };
+
+        recordingStore.storeFile(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, client, aclResolver, crawledIds, file);
+
+        assertEquals("a degraded document must still be indexed, not dropped", 1, stored.size());
+        assertFalse("a degraded outcome must release the claim so a later collaborator can retry", crawledIds.contains("file-1"));
+        assertEquals("releaseCrawled must be called for the degraded file", List.of("file-1"), recordingStore.releasedIds);
+    }
+
     private Map<String, String> getConfig() {
         final URL url = getClass().getClassLoader().getResource("config.json");
         if (url == null) {
@@ -441,6 +603,82 @@ public class BoxDataStoreTest extends UnitDsTestCase {
         @Override
         public String getBaseUrl() {
             return baseUrl;
+        }
+    }
+
+    /**
+     * A BoxClient whose file download always fails, driving the real (swallowed, since
+     * ignore_error defaults to true) catch branch of {@link BoxDataStore#getFileContents}.
+     */
+    static class ThrowingContentBoxClient extends MockBoxClient {
+        @Override
+        public InputStream getFileInputStream(final BoxFile file) {
+            throw new CrawlingAccessException("simulated download failure");
+        }
+    }
+
+    /**
+     * A BoxClient that returns a Box Note payload with neither "doc" nor "atext" - the
+     * genuinely-empty case that {@link BoxNoteParser#parse} handles without throwing.
+     */
+    static class EmptyBoxNoteBoxClient extends MockBoxClient {
+        @Override
+        public InputStream getFileInputStream(final BoxFile file) {
+            return new ByteArrayInputStream("{}".getBytes(StandardCharsets.UTF_8));
+        }
+    }
+
+    /**
+     * A BoxFile whose info and download URL are canned, so {@link BoxDataStore#storeFile} can run
+     * end-to-end without any real Box API access.
+     */
+    static class FakeBoxFile extends BoxFile {
+        private final String infoJson;
+
+        FakeBoxFile(final String id, final String infoJson) {
+            super(null, id);
+            this.infoJson = infoJson;
+        }
+
+        @Override
+        public BoxFile.Info getInfo(final String... fields) {
+            return this.new Info(infoJson);
+        }
+
+        @Override
+        public URL getDownloadURL() {
+            try {
+                return new URL("https://app.box.com/download/" + getID());
+            } catch (final MalformedURLException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        @Override
+        public com.box.sdk.BoxResourceIterable<BoxCollaboration.Info> getAllFileCollaborations(final String... fields) {
+            // BoxDataStore.BoxFileAPI's constructor only calls this when debug logging is
+            // enabled (it is, in this test environment); the real BoxFile implementation needs
+            // a live BoxAPIConnection, which this fake file has none of.
+            return null;
+        }
+    }
+
+    /**
+     * A BoxDataStore that avoids the MimeTypeHelper container dependency (unrelated to the
+     * degradation/release wiring under test) and records every {@link #releaseCrawled} call.
+     */
+    static class RecordingBoxDataStore extends BoxDataStore {
+        final List<String> releasedIds = new ArrayList<>();
+
+        @Override
+        protected String getFileMimeType(final BoxFile.Info info) {
+            return "text/plain";
+        }
+
+        @Override
+        protected void releaseCrawled(final Set<String> crawledIds, final String fileId) {
+            releasedIds.add(fileId);
+            super.releaseCrawled(crawledIds, fileId);
         }
     }
 

@@ -24,6 +24,8 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -274,6 +276,7 @@ public class BoxDataStore extends AbstractDataStore {
         // destroyed one pool per user, with its await applying per user, so anything still
         // queued when one user's crawl ran long was dropped by shutdownNow() without a log line.
         final ExecutorService executorService = newFixedThreadPool(getNumberOfThreads(paramMap));
+        final Set<String> crawledIds = ConcurrentHashMap.newKeySet();
         try {
             client.getUsers(filterTerm, info -> {
                 if (!alive) {
@@ -296,8 +299,14 @@ public class BoxDataStore extends AbstractDataStore {
                     if (!alive) {
                         return;
                     }
+                    if (!markCrawled(crawledIds, file.getID())) {
+                        if (logger.isDebugEnabled()) {
+                            logger.debug("{} was already crawled via another user.", file.getID());
+                        }
+                        return;
+                    }
                     executorService.execute(() -> storeFile(dataConfig, callback, config, paramMap, scriptMap, defaultDataMap, userClient,
-                            aclResolver, file));
+                            aclResolver, crawledIds, file));
                     if (readInterval > 0) {
                         sleep(readInterval);
                     }
@@ -376,15 +385,17 @@ public class BoxDataStore extends AbstractDataStore {
      * @param defaultDataMap The default data map.
      * @param client The Box client scoped to the file's user, from {@link BoxClient#forUser(String)}.
      * @param aclResolver The resolver used to compute the file's search roles.
+     * @param crawledIds The set of file IDs already successfully crawled in this crawl session.
      * @param file The Box file to store.
      */
     protected void storeFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final Config config,
             final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
-            final BoxClient client, final BoxAclResolver aclResolver, final BoxFile file) {
+            final BoxClient client, final BoxAclResolver aclResolver, final Set<String> crawledIds, final BoxFile file) {
         final CrawlerStatsHelper crawlerStatsHelper = ComponentUtil.getCrawlerStatsHelper();
         final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
         final StatsKeyObject statsKey = new StatsKeyObject(file.getID());
         paramMap.put(Constants.CRAWLER_STATS_KEY, statsKey);
+        final DocumentQuality quality = new DocumentQuality();
         try {
             crawlerStatsHelper.begin(statsKey);
             final BoxFile.Info info = file.getInfo(config.fields);
@@ -440,7 +451,7 @@ public class BoxDataStore extends AbstractDataStore {
             final String fileType = ComponentUtil.getFileTypeHelper().get(mimeType);
 
             fileMap.put(FILE_URL, url);
-            fileMap.put(FILE_CONTENTS, getFileContents(client, file, info, downloadURL, mimeType, config.ignoreError));
+            fileMap.put(FILE_CONTENTS, getFileContents(client, file, info, downloadURL, mimeType, config.ignoreError, quality));
             fileMap.put(FILE_MIMETYPE, mimeType);
             fileMap.put(FILE_FILETYPE, fileType);
             fileMap.put(FILE_DOWNLOAD_URL, downloadURL);
@@ -483,7 +494,7 @@ public class BoxDataStore extends AbstractDataStore {
             if (defaultDataMap.get(ComponentUtil.getFessConfig().getIndexFieldRole()) instanceof final List<?> roleTypeList) {
                 roleTypeList.stream().map(String.class::cast).forEach(baseRoles::add);
             }
-            fileMap.put(FILE_ROLES, aclResolver.getRoles(client, info, baseRoles));
+            fileMap.put(FILE_ROLES, aclResolver.getRoles(client, info, baseRoles, quality));
 
             fileMap.put("api", new BoxFileAPI(file));
 
@@ -515,7 +526,11 @@ public class BoxDataStore extends AbstractDataStore {
 
             callback.store(paramMap, dataMap);
             crawlerStatsHelper.record(statsKey, StatsAction.FINISHED);
+            if (quality.isDegraded()) {
+                releaseCrawled(crawledIds, file.getID());
+            }
         } catch (final CrawlingAccessException e) {
+            releaseCrawled(crawledIds, file.getID());
             logger.warn("Crawling Access Exception at : {}", dataMap, e);
 
             Throwable target = e;
@@ -538,6 +553,7 @@ public class BoxDataStore extends AbstractDataStore {
             failureUrlService.store(dataConfig, errorName, "", target);
             crawlerStatsHelper.record(statsKey, StatsAction.ACCESS_EXCEPTION);
         } catch (final Throwable t) {
+            releaseCrawled(crawledIds, file.getID());
             logger.warn("Crawling Access Exception at : {}", dataMap, t);
             final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
             failureUrlService.store(dataConfig, t.getClass().getCanonicalName(), "", t);
@@ -556,10 +572,11 @@ public class BoxDataStore extends AbstractDataStore {
      * @param downloadURL The download URL for the file.
      * @param mimeType The MIME type of the file.
      * @param ignoreError Whether to ignore errors during content extraction.
+     * @param quality optional degradation tracker; if extraction fails and the error is ignored, {@code quality.contentDegraded} is set to true
      * @return The extracted text content of the file.
      */
     protected String getFileContents(final BoxClient client, final BoxFile file, final BoxFile.Info info, final String downloadURL,
-            final String mimeType, final boolean ignoreError) {
+            final String mimeType, final boolean ignoreError, final DocumentQuality quality) {
         final String name = info.getName();
         try (final InputStream in = client.getFileInputStream(file)) {
             if ("boxnote".equals(ResourceUtil.getExtension(name))) {
@@ -579,6 +596,9 @@ public class BoxDataStore extends AbstractDataStore {
                 logger.warn("Failed to get contents: {}", name, e);
             } else {
                 logger.warn("Failed to get contents: {}. {}", name, e.getMessage());
+            }
+            if (quality != null) {
+                quality.contentDegraded = true;
             }
             return StringUtil.EMPTY;
         }
@@ -631,6 +651,61 @@ public class BoxDataStore extends AbstractDataStore {
     }
 
     /**
+     * Records a file as crawled and reports whether this call was the first.
+     *
+     * <p>Every enterprise user is walked from their own root folder, so a shared
+     * file is reached once per collaborator. The resulting documents are identical
+     * because the URL is derived from the file ID, but the crawl time and the API
+     * calls multiply. This method optimistically claims the file ID before
+     * {@link #storeFile(DataConfig, IndexUpdateCallback, Config, DataStoreParams, Map, Map, BoxClient, BoxAclResolver, Set, BoxFile)}
+     * runs, allowing later collaborators to skip the file if it was already successfully indexed.</p>
+     *
+     * <p>Resilient to partial failures: if the first collaborator encounters an
+     * error, the claim is released in two scenarios:</p>
+     * <ol>
+     * <li>Hard failure: storeFile throws an uncaught exception. The file stays
+     * unindexed and a later collaborator can retry from scratch.</li>
+     * <li>Swallowed error: content extraction fails with {@code ignore_error=true},
+     * or collaboration lookup fails. The document is stored with degraded content
+     * or roles, the claim is released, and a later collaborator can retry with
+     * better permissions, producing a complete version that overwrites the degraded one.</li>
+     * </ol>
+     * <p>Best-effort: since users are walked sequentially, if all collaborators
+     * have already been walked past a file when a swallowed error is discovered,
+     * the degraded document remains indexed with no retry. Hard failures that
+     * leave a file unindexed are unretriable if all users have been walked.</p>
+     *
+     * @param crawledIds the set of file IDs already seen
+     * @param fileId the file ID
+     * @return true if this file has not been crawled yet
+     */
+    protected boolean markCrawled(final Set<String> crawledIds, final String fileId) {
+        return crawledIds.add(fileId);
+    }
+
+    /**
+     * Releases a file from the crawled set, allowing it to be processed again.
+     *
+     * <p>Called in two scenarios:</p>
+     * <ol>
+     * <li>When {@link #storeFile(DataConfig, IndexUpdateCallback, Config, DataStoreParams, Map, Map, BoxClient, BoxAclResolver, Set, BoxFile)}
+     * fails with an exception that is not caught: {@code callback.store} is never reached, and the file
+     * stays unindexed. A later collaborator who reaches the same file can attempt it independently.</li>
+     * <li>When the document is stored successfully but with degradation (content extraction failed with errors
+     * ignored, or collaborations could not be listed): the document is indexed but incomplete. A later
+     * collaborator with better permissions can retry and may produce a complete version, which overwrites
+     * the degraded one (same URL derived from file ID).</li>
+     * </ol>
+     * <p>Releasing an id that was never claimed is harmless.</p>
+     *
+     * @param crawledIds the set of file IDs already seen
+     * @param fileId the file ID
+     */
+    protected void releaseCrawled(final Set<String> crawledIds, final String fileId) {
+        crawledIds.remove(fileId);
+    }
+
+    /**
      * Creates and initializes a new {@link BoxClient}.
      *
      * @param paramMap The data store parameters.
@@ -641,6 +716,20 @@ public class BoxDataStore extends AbstractDataStore {
         client.setInitParameterMap(paramMap.asMap());
         client.init();
         return client;
+    }
+
+    /**
+     * Tracks whether a document's content or ACL roles are degraded due to
+     * errors that were caught and ignored rather than causing the document
+     * to be skipped entirely.
+     */
+    protected static class DocumentQuality {
+        boolean contentDegraded = false;
+        boolean aclDegraded = false;
+
+        boolean isDegraded() {
+            return contentDegraded || aclDegraded;
+        }
     }
 
     /**
