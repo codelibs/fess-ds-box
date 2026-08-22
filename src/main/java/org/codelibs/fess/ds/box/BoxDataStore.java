@@ -103,6 +103,13 @@ public class BoxDataStore extends AbstractDataStore {
     /** Parameter key for a term to filter users by. */
     protected static final String FILTER_TERM = "filter_term";
 
+    /**
+     * Parameter keys that must never reach the script evaluation context.
+     */
+    protected static final String[] SENSITIVE_PARAMS =
+            { BoxClient.CLIENT_ID_PARAM, BoxClient.CLIENT_SECRET_PARAM, BoxClient.PUBLIC_KEY_ID_PARAM, BoxClient.PRIVATE_KEY_PARAM,
+                    BoxClient.PASSPHRASE_PARAM, BoxClient.ENTERPRISE_ID_PARAM, "proxy_password" };
+
     // scripts
     /** Key for the file data map in the script context. */
     protected static final String FILE = "file";
@@ -192,6 +199,21 @@ public class BoxDataStore extends AbstractDataStore {
     @Override
     protected String getName() {
         return "Box";
+    }
+
+    /**
+     * Builds the script evaluation context from the data store parameters, with
+     * credentials removed.
+     *
+     * @param paramMap the data store parameters
+     * @return a map safe to expose to user-supplied scripts
+     */
+    protected Map<String, Object> createResultMap(final DataStoreParams paramMap) {
+        final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap.asMap());
+        for (final String key : SENSITIVE_PARAMS) {
+            resultMap.remove(key);
+        }
+        return resultMap;
     }
 
     @Override
@@ -318,7 +340,7 @@ public class BoxDataStore extends AbstractDataStore {
             final String url = getUrl(client, info);
             logger.info("Crawling URL: {}", url);
 
-            final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap.asMap());
+            final Map<String, Object> resultMap = createResultMap(paramMap);
             final Map<String, Object> fileMap = new HashMap<>();
 
             if (info.getSize() > config.maxSize) {
@@ -654,6 +676,22 @@ public class BoxDataStore extends AbstractDataStore {
         }
 
         /**
+         * Returns whether a collaboration grants read access that should be
+         * reflected in the search index.
+         *
+         * <p>Only accepted collaborations grant access at all; pending and rejected
+         * collaborators cannot open the file. The uploader role can neither preview
+         * nor download, so it must not grant search access either.</p>
+         *
+         * @param status the collaboration status
+         * @param role the collaboration role
+         * @return true if the collaboration should contribute a search role
+         */
+        static boolean isEffectiveCollaboration(final BoxCollaboration.Status status, final BoxCollaboration.Role role) {
+            return status == BoxCollaboration.Status.ACCEPTED && role != null && role != BoxCollaboration.Role.UPLOADER;
+        }
+
+        /**
          * Generates a list of Fess search roles based on the file's collaborations.
          * This allows mapping Box permissions to Fess search permissions.
          * @return A list of role strings.
@@ -666,6 +704,12 @@ public class BoxDataStore extends AbstractDataStore {
                 logger.debug("collaborationList: {}", collaborationList.size());
             }
             collaborationList.forEach(c -> {
+                if (!isEffectiveCollaboration(c.getStatus(), c.getRole())) {
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("skipping collaboration: status={}, role={}", c.getStatus(), c.getRole());
+                    }
+                    return;
+                }
                 final Info accessibleBy = c.getAccessibleBy();
                 if (accessibleBy == null) {
                     return;

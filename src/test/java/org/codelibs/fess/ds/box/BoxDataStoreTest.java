@@ -39,6 +39,7 @@ import org.codelibs.fess.opensearch.config.exentity.DataConfig;
 import org.codelibs.fess.util.ComponentUtil;
 import org.codelibs.fess.ds.box.UnitDsTestCase;
 
+import com.box.sdk.BoxCollaboration;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -225,6 +226,49 @@ public class BoxDataStoreTest extends UnitDsTestCase {
                 logger.debug(dataMap.toString());
             }
         }, paramMap, scriptMap, defaultDataMap);
+    }
+
+    @Test
+    public void test_createResultMap_redactsCredentials() {
+        final DataStoreParams paramMap = new DataStoreParams();
+        paramMap.put("client_id", "the-client-id");
+        paramMap.put("client_secret", "the-client-secret");
+        paramMap.put("public_key_id", "the-public-key-id");
+        paramMap.put("private_key", "-----BEGIN ENCRYPTED PRIVATE KEY-----");
+        paramMap.put("passphrase", "the-passphrase");
+        paramMap.put("enterprise_id", "the-enterprise-id");
+        paramMap.put("proxy_password", "the-proxy-password");
+        paramMap.put("max_size", "12345");
+
+        final Map<String, Object> resultMap = dataStore.createResultMap(paramMap);
+
+        assertNull(resultMap.get("client_id"));
+        assertNull(resultMap.get("client_secret"));
+        assertNull(resultMap.get("public_key_id"));
+        assertNull(resultMap.get("private_key"));
+        assertNull(resultMap.get("passphrase"));
+        assertNull(resultMap.get("enterprise_id"));
+        assertNull(resultMap.get("proxy_password"));
+        assertEquals("12345", resultMap.get("max_size"));
+    }
+
+    @Test
+    public void test_isEffectiveCollaboration_acceptsOnlyReadableAccepted() {
+        assertTrue(BoxDataStore.BoxFileAPI.isEffectiveCollaboration(BoxCollaboration.Status.ACCEPTED, BoxCollaboration.Role.VIEWER));
+        assertTrue(BoxDataStore.BoxFileAPI.isEffectiveCollaboration(BoxCollaboration.Status.ACCEPTED, BoxCollaboration.Role.EDITOR));
+        assertTrue(BoxDataStore.BoxFileAPI.isEffectiveCollaboration(BoxCollaboration.Status.ACCEPTED, BoxCollaboration.Role.CO_OWNER));
+        assertTrue(BoxDataStore.BoxFileAPI.isEffectiveCollaboration(BoxCollaboration.Status.ACCEPTED, BoxCollaboration.Role.PREVIEWER));
+
+        // Uploader cannot preview or download, so it must not grant search access.
+        assertFalse(BoxDataStore.BoxFileAPI.isEffectiveCollaboration(BoxCollaboration.Status.ACCEPTED, BoxCollaboration.Role.UPLOADER));
+
+        // Pending and rejected collaborators have no access yet.
+        assertFalse(BoxDataStore.BoxFileAPI.isEffectiveCollaboration(BoxCollaboration.Status.PENDING, BoxCollaboration.Role.EDITOR));
+        assertFalse(BoxDataStore.BoxFileAPI.isEffectiveCollaboration(BoxCollaboration.Status.REJECTED, BoxCollaboration.Role.EDITOR));
+
+        // Missing values must not grant access.
+        assertFalse(BoxDataStore.BoxFileAPI.isEffectiveCollaboration(null, BoxCollaboration.Role.EDITOR));
+        assertFalse(BoxDataStore.BoxFileAPI.isEffectiveCollaboration(BoxCollaboration.Status.ACCEPTED, null));
     }
 
     private Map<String, String> getConfig() {
