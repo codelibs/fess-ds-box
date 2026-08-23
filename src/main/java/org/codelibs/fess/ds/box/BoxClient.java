@@ -28,6 +28,7 @@ import org.apache.commons.io.output.DeferredFileOutputStream;
 import org.apache.commons.lang3.SystemUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codelibs.core.exception.InterruptedRuntimeException;
 import org.codelibs.core.lang.StringUtil;
 import org.codelibs.core.timer.TimeoutManager;
 import org.codelibs.core.timer.TimeoutTask;
@@ -128,6 +129,16 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
     /** The number of access tokens the shared token cache keeps in memory. */
     protected static final int TOKEN_CACHE_SIZE = 512;
 
+    /**
+     * Milliseconds to wait between two attempts of the {@code 401} retry loop in
+     * {@link #getFiles}.
+     *
+     * <p>Each attempt rebuilds the connection, which performs a JWT token exchange, so running
+     * {@link #MAX_RETRY_COUNT} attempts back to back would spend up to that many token exchanges
+     * on a single item.</p>
+     */
+    protected static final long RETRY_INTERVAL = 1000L;
+
     /** The base URL for the Box application. */
     protected String baseUrl;
 
@@ -212,8 +223,7 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
         }
 
         try {
-            final BoxDeveloperEditionAPIConnection con =
-                    BoxDeveloperEditionAPIConnection.getAppEnterpriseConnection(boxConfig, accessTokenCache);
+            final BoxAPIConnection con = newConnection();
             configureConnection(con);
             if (impersonatedUserId != null) {
                 // This client is one forUser() handed out. A rebuild (e.g. the 401 retry in
@@ -245,7 +255,7 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
             // stays only for the single primary client that init() creates.
             refreshTokenTask = TimeoutManager.getInstance().addTimeoutTarget(() -> {
                 if (connection != null) {
-                    logger.info("Rrefreshing a current access token.");
+                    logger.info("Refreshing a current access token.");
                     try {
                         connection.refresh();
                     } catch (final Exception e) {
@@ -254,6 +264,21 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
                 }
             }, Integer.parseInt(getInitParameter(REFRESH_TOKEN_INTERVAL_PARAM, DEFAULT_REFRESH_TOKEN_INTERVAL)), true);
         }
+    }
+
+    /**
+     * Opens a new, unconfigured connection to Box for this client's app.
+     *
+     * <p>The only method in this class that talks to Box before any request is made, and the
+     * single place {@link #createConnection()} and {@link #forUser(String)} both go through, so
+     * that the identity wiring built on top of it - {@code configureConnection}, the
+     * {@code asUser} call and its re-application after a rebuild - can be exercised without a
+     * live tenant.</p>
+     *
+     * @return a new connection authenticated as the enterprise service account
+     */
+    protected BoxAPIConnection newConnection() {
+        return BoxDeveloperEditionAPIConnection.getAppEnterpriseConnection(boxConfig, accessTokenCache);
     }
 
     /**
@@ -305,6 +330,10 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
 
     /**
      * Closes the Box client, revoking the current access token and stopping the refresh task.
+     *
+     * <p>A failed revoke is logged and swallowed. {@code storeData} wraps this client in
+     * try-with-resources, so letting the revoke propagate would fail the whole crawl at the very
+     * end of an otherwise successful run, after every document had already been indexed.</p>
      */
     @Override
     public void close() {
@@ -312,7 +341,11 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
             refreshTokenTask.cancel();
         }
         if (connection != null) {
-            connection.revokeToken();
+            try {
+                connection.revokeToken();
+            } catch (final Exception e) {
+                logger.warn("Failed to revoke an access token.", e);
+            }
         }
     }
 
@@ -383,7 +416,12 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
      * extra Box API call is made for it.</p>
      *
      * @param folder the folder to start from
-     * @param fields the fields to retrieve for each item
+     * @param fields the fields to request when listing each folder's children, or {@code null} to
+     *        let Box pick its own default set. Only {@code type}, {@code id} and {@code name} are
+     *        read here, and every entry is handed to its consumer as a bare {@link BoxFile} or
+     *        {@link BoxFolder} that the consumer re-fetches - so a longer list only inflates every
+     *        {@code GET /folders/{id}/items} response, and a name this endpoint rejects fails the
+     *        whole walk with a {@code 400} that the retry below does not catch.
      * @param fileConsumer a consumer to process each file
      * @param folderConsumer a consumer to process each descendant folder, or {@code null} to
      *        only recurse into folders without surfacing them
@@ -448,14 +486,39 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
                         logger.debug("Failed to access {}", info.getID(), e);
                     }
                 }
+                if (i + 1 >= maxRetryCount) {
+                    break;
+                }
                 final BoxAPIConnection con = connection;
-                synchronized (boxConfig) {
+                // Guarded by this client, not by boxConfig: forUser() copies the boxConfig
+                // reference into every per-user client, so locking on it would make one monitor
+                // serialise a field - connection - that is per client.
+                synchronized (this) {
                     if (con == connection) {
                         createConnection();
                     }
                 }
+                // Rebuilding the connection performs a JWT token exchange. Without a pause, a
+                // persistently-401 item would burn maxRetryCount of them back to back against an
+                // API limited to 1000 requests per minute per user.
+                sleepForRetry();
             }
+            logger.warn("Skipped {} after {} attempt(s): every attempt was rejected with 401 (Unauthorized).", info.getID(), maxRetryCount);
         });
+    }
+
+    /**
+     * Waits between two attempts of the {@code 401} retry loop in {@link #getFiles}.
+     *
+     * @see #RETRY_INTERVAL
+     */
+    protected void sleepForRetry() {
+        try {
+            Thread.sleep(RETRY_INTERVAL);
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new InterruptedRuntimeException(e);
+        }
     }
 
     /**
@@ -521,8 +584,7 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
         // reads) must be copied explicitly or file downloads would silently stop honouring it.
         userClient.setMaxCachedContentSize(maxCachedContentSize);
         userClient.setInitParameterMap(initParamMap);
-        final BoxDeveloperEditionAPIConnection con =
-                BoxDeveloperEditionAPIConnection.getAppEnterpriseConnection(boxConfig, accessTokenCache);
+        final BoxAPIConnection con = newConnection();
         configureConnection(con);
         con.asUser(userId);
         userClient.connection = con;

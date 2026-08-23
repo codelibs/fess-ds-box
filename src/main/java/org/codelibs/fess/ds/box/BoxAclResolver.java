@@ -81,10 +81,20 @@ public class BoxAclResolver {
      * <p>This resolver no longer holds a client: each user now crawls through its own
      * {@link BoxClient} instance, so the client that can read a folder's collaborations
      * is only known at call time and is passed into {@link #getRoles(BoxClient, BoxFile.Info, List)}
-     * instead. The folder role cache is keyed by folder id alone, which is safe because
-     * folder ids are globally unique in Box (the sole exception, {@value #ROOT_FOLDER_ID},
-     * is always skipped as an ancestor) - so the first user able to read a folder populates
-     * the cache for every other user's crawl.</p>
+     * instead.</p>
+     *
+     * <p><b>Cache assumption.</b> The folder role cache is keyed by folder id alone and is
+     * populated by whichever user's walker reaches a folder first, which depends on the order
+     * Box enumerates users in. Folder ids being globally unique (the sole exception,
+     * {@value #ROOT_FOLDER_ID}, is always skipped as an ancestor) makes the <em>key</em> safe,
+     * but that is not the property at risk: what this assumes is that a folder's collaboration
+     * list is <em>identical for every caller who can read it</em>. Box's
+     * {@code /folders/{id}/collaborations} may not honour that - {@code can_non_owners_view_collaborators}
+     * and non-owner access can both narrow what a given caller sees - and a truncated read still
+     * succeeds, so {@code aclDegraded} is never set, nothing releases the dedup claim and nothing
+     * retries. The result would be silent, order-dependent under-permissioning. This is
+     * unverified: it needs a live tenant to settle (design section 13, items 2 and 3), and the
+     * caching strategy is deliberately left alone until then.</p>
      *
      * @param defaultPermissions encoded roles applied to every document
      * @param companySharedLinkRole role for enterprise-wide shared links, or null to disable
@@ -162,8 +172,28 @@ public class BoxAclResolver {
     }
 
     /**
+     * Returns whether a collaboration grants read access that should be
+     * reflected in the search index.
+     *
+     * <p>Only accepted collaborations grant access at all; pending and rejected
+     * collaborators cannot open the file. The uploader role can neither preview
+     * nor download, so it must not grant search access either.</p>
+     *
+     * @param status the collaboration status
+     * @param role the collaboration role
+     * @return true if the collaboration should contribute a search role
+     */
+    static boolean isEffectiveCollaboration(final BoxCollaboration.Status status, final BoxCollaboration.Role role) {
+        return status == BoxCollaboration.Status.ACCEPTED && role != null && role != BoxCollaboration.Role.UPLOADER;
+    }
+
+    /**
      * Converts collaborations into Fess search roles, keeping only those that
      * grant read access.
+     *
+     * <p>The single conversion in this plugin: {@code file.roles} reaches it through
+     * {@link #getRoles(BoxClient, BoxFile.Info, List)}, and the older script-level
+     * {@code file.api.collaborationRoles} delegates to it too.</p>
      *
      * @param collaborations the collaborations
      * @return the search roles
@@ -175,7 +205,10 @@ public class BoxAclResolver {
         final SystemHelper systemHelper = ComponentUtil.getSystemHelper();
         final List<String> roles = new ArrayList<>();
         for (final BoxCollaboration.Info c : collaborations) {
-            if (!BoxDataStore.BoxFileAPI.isEffectiveCollaboration(c.getStatus(), c.getRole())) {
+            if (!isEffectiveCollaboration(c.getStatus(), c.getRole())) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("skipping collaboration: status={}, role={}", c.getStatus(), c.getRole());
+                }
                 continue;
             }
             final BoxCollaborator.Info accessibleBy = c.getAccessibleBy();

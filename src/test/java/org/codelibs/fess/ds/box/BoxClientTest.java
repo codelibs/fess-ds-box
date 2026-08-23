@@ -22,15 +22,28 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.Logger;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
+import org.codelibs.fess.crawler.client.AbstractCrawlerClient;
 import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.ds.box.UnitDsTestCase;
 
 import com.box.sdk.BoxAPIConnection;
+import com.box.sdk.BoxAPIException;
+import com.box.sdk.BoxAPIResponseException;
+import com.box.sdk.BoxConfig;
 import com.box.sdk.BoxFile;
 import com.box.sdk.BoxFolder;
 import com.box.sdk.BoxItem;
+import com.box.sdk.InMemoryLRUAccessTokenCache;
+import com.box.sdk.JWTEncryptionPreferences;
 
 public class BoxClientTest extends UnitDsTestCase {
 
@@ -199,6 +212,56 @@ public class BoxClientTest extends UnitDsTestCase {
             client.close();
         } catch (final Exception e) {
             fail("close() should not throw exception: " + e.getMessage());
+        }
+    }
+
+    @Test
+    public void test_close_failingRevokeDoesNotPropagate() {
+        // storeData wraps the client in try-with-resources, so a revoke that throws at the very
+        // end of an otherwise successful crawl would fail the whole job after every document had
+        // already been indexed.
+        final RevokeRecordingConnection connection = new RevokeRecordingConnection(true);
+        final BoxClient client = new BoxClient();
+        client.connection = connection;
+
+        try {
+            client.close();
+        } catch (final Exception e) {
+            fail("a failing revokeToken() must not propagate out of close(): " + e);
+        }
+
+        assertTrue("close() must still have attempted the revoke", connection.revoked);
+    }
+
+    @Test
+    public void test_close_revokesTheToken() {
+        // The complement of the test above: swallowing the failure must not have turned into
+        // skipping the call.
+        final RevokeRecordingConnection connection = new RevokeRecordingConnection(false);
+        final BoxClient client = new BoxClient();
+        client.connection = connection;
+
+        client.close();
+
+        assertTrue("close() must revoke the access token", connection.revoked);
+    }
+
+    /** A connection that records - and optionally fails - the {@code revokeToken()} call. */
+    static class RevokeRecordingConnection extends BoxAPIConnection {
+        private final boolean failing;
+        boolean revoked;
+
+        RevokeRecordingConnection(final boolean failing) {
+            super("dummy-token");
+            this.failing = failing;
+        }
+
+        @Override
+        public void revokeToken() {
+            revoked = true;
+            if (failing) {
+                throw new BoxAPIException("simulated revoke failure", 401, "unauthorized");
+            }
         }
     }
 
@@ -440,6 +503,239 @@ public class BoxClientTest extends UnitDsTestCase {
         assertTrue("the 3-arg overload must delegate to the 4-arg method", client.fourArgInvoked);
         assertNull("the 3-arg overload must delegate with a null folder consumer", client.lastFolderConsumer);
         assertEquals(List.of("f1", "f2"), fileIds);
+    }
+
+    // --- getFiles: the 401 retry loop ---
+
+    /**
+     * A {@link FolderLookupBoxClient} that records - instead of performing - the two side effects
+     * of a retry: rebuilding the connection (a JWT token exchange) and waiting between attempts.
+     */
+    static class RetryRecordingBoxClient extends FolderLookupBoxClient {
+        int reconnects;
+        int sleeps;
+
+        @Override
+        protected void createConnection() {
+            reconnects++;
+        }
+
+        @Override
+        protected void sleepForRetry() {
+            sleeps++;
+        }
+    }
+
+    @Test
+    public void test_getFiles_persistent401_sleepsBetweenAttemptsAndGivesUpWithAWarning() {
+        // Every attempt rebuilds the connection, so without a pause a persistently-401 item
+        // would burn max_retry_count JWT token exchanges back to back against an API limited to
+        // 1000 requests per minute per user. And when the loop is exhausted the item simply
+        // vanishes, so at minimum it must say so.
+        final RetryRecordingBoxClient client = new RetryRecordingBoxClient();
+        client.maxRetryCount = 3;
+        final AtomicInteger attempts = new AtomicInteger();
+        final List<String> warnings = new ArrayList<>();
+
+        final CapturingAppender appender = CapturingAppender.attachTo(BoxClient.class, warnings);
+        try {
+            client.getFiles(new RecordingFolder("root", List.of(fileInfo("f1"))), TEST_FIELDS, f -> {
+                attempts.incrementAndGet();
+                throw new BoxAPIResponseException("unauthorized", 401, "", null);
+            });
+        } finally {
+            appender.detach();
+        }
+
+        assertEquals("the item must be attempted max_retry_count times", 3, attempts.get());
+        // Only between attempts: the last failure has no attempt after it to prepare for.
+        assertEquals("the connection must be rebuilt between attempts, not after the last one", 2, client.reconnects);
+        assertEquals("every retry must be preceded by a wait", 2, client.sleeps);
+        assertEquals("giving up must be logged exactly once", 1, warnings.size());
+        assertTrue("the warning must name the item that was skipped: " + warnings, warnings.get(0).contains("f1"));
+    }
+
+    @Test
+    public void test_getFiles_success_neitherSleepsNorWarns() {
+        // The complement: the backoff and the give-up warning must not fire on the happy path.
+        final RetryRecordingBoxClient client = new RetryRecordingBoxClient();
+        client.maxRetryCount = 3;
+        final List<String> fileIds = new ArrayList<>();
+        final List<String> warnings = new ArrayList<>();
+
+        final CapturingAppender appender = CapturingAppender.attachTo(BoxClient.class, warnings);
+        try {
+            client.getFiles(new RecordingFolder("root", List.of(fileInfo("f1"))), TEST_FIELDS, f -> fileIds.add(f.getID()));
+        } finally {
+            appender.detach();
+        }
+
+        assertEquals(List.of("f1"), fileIds);
+        assertEquals("a successful item must not wait", 0, client.sleeps);
+        assertEquals("a successful item must not rebuild the connection", 0, client.reconnects);
+        assertEquals("a successful item must not warn: " + warnings, 0, warnings.size());
+    }
+
+    /** Collects the formatted message of every WARN event a logger emits while attached. */
+    static class CapturingAppender extends AbstractAppender {
+        private final List<String> messages;
+        private final Logger target;
+
+        private CapturingAppender(final Logger target, final List<String> messages) {
+            super("BoxClientTestCapture", null, null, true, Property.EMPTY_ARRAY);
+            this.target = target;
+            this.messages = messages;
+        }
+
+        static CapturingAppender attachTo(final Class<?> clazz, final List<String> messages) {
+            final Logger target = (Logger) LogManager.getLogger(clazz);
+            final CapturingAppender appender = new CapturingAppender(target, messages);
+            appender.start();
+            target.addAppender(appender);
+            return appender;
+        }
+
+        void detach() {
+            target.removeAppender(this);
+            stop();
+        }
+
+        @Override
+        public void append(final LogEvent event) {
+            if (Level.WARN.equals(event.getLevel())) {
+                messages.add(event.getMessage().getFormattedMessage());
+            }
+        }
+    }
+
+    // --- forUser / createConnection: per-user identity isolation ---
+
+    /**
+     * A {@link BoxClient} whose {@link #newConnection()} hands out an offline, recording
+     * connection instead of performing a JWT token exchange with Box. This is the only seam the
+     * identity wiring - which connection each client gets, and whether impersonation survives a
+     * rebuild - can be observed through without a live tenant.
+     */
+    static class SeamBoxClient extends BoxClient {
+        final List<AsUserRecordingConnection> createdConnections = new ArrayList<>();
+
+        @Override
+        protected BoxAPIConnection newConnection() {
+            final AsUserRecordingConnection con = new AsUserRecordingConnection();
+            createdConnections.add(con);
+            return con;
+        }
+    }
+
+    /** A connection that records every {@code asUser()} call made on it. */
+    static class AsUserRecordingConnection extends BoxAPIConnection {
+        final List<String> asUserCalls = new ArrayList<>();
+
+        AsUserRecordingConnection() {
+            super("dummy-token");
+        }
+
+        @Override
+        public void asUser(final String userId) {
+            asUserCalls.add(userId);
+            super.asUser(userId);
+        }
+
+        @Override
+        public void revokeToken() {
+            // The real implementation issues a live HTTP request to Box; these tests must stay
+            // offline, and close() is called on the service-account client below.
+        }
+    }
+
+    /**
+     * Reads another client's {@code maxCachedContentSize}.
+     *
+     * <p>The field is {@code protected} on {@link AbstractCrawlerClient}, in a different package,
+     * and {@code AbstractCrawlerClient} declares only a setter - so neither this test class nor a
+     * {@link BoxClient} subclass can read it off an instance typed as {@code BoxClient}. Reading
+     * it reflectively keeps the assertion here instead of adding a production accessor that only
+     * a test would ever call.</p>
+     */
+    private static long maxCachedContentSizeOf(final BoxClient client) {
+        try {
+            final java.lang.reflect.Field field = AbstractCrawlerClient.class.getDeclaredField("maxCachedContentSize");
+            field.setAccessible(true);
+            return field.getLong(client);
+        } catch (final ReflectiveOperationException e) {
+            throw new IllegalStateException("Failed to read maxCachedContentSize", e);
+        }
+    }
+
+    private SeamBoxClient newSeamClient() {
+        final SeamBoxClient client = new SeamBoxClient();
+        final Map<String, Object> params = new HashMap<>();
+        params.put("max_retry_attempts", "7");
+        client.setInitParameterMap(params);
+        client.baseUrl = "https://app.box.com";
+        client.boxConfig = new BoxConfig("cid", "secret", "ent", new JWTEncryptionPreferences());
+        client.maxRetryCount = 4;
+        client.accessTokenCache = new InMemoryLRUAccessTokenCache(8);
+        client.setMaxCachedContentSize(12345L);
+        return client;
+    }
+
+    @Test
+    public void test_forUser_copiesConnectionStateAndImpersonatesOnItsOwnConnection() {
+        final SeamBoxClient client = newSeamClient();
+
+        final BoxClient userClient = client.forUser("user-1");
+
+        assertNotSame("each user must get its own client", client, userClient);
+        assertSame("the per-user client must reuse the app configuration", client.boxConfig, userClient.boxConfig);
+        assertSame("the per-user client must share the token cache, so impersonating costs no extra token exchange",
+                client.accessTokenCache, userClient.accessTokenCache);
+        assertEquals("the per-user client must inherit max_retry_count", client.maxRetryCount, userClient.maxRetryCount);
+        assertEquals("init() is never called on the per-user client, so maxCachedContentSize must be copied explicitly", 12345L,
+                maxCachedContentSizeOf(userClient));
+        assertEquals("the per-user client must remember whom it impersonates", "user-1", userClient.impersonatedUserId);
+
+        assertEquals("forUser must open a connection of its own", 1, client.createdConnections.size());
+        final AsUserRecordingConnection userConnection = client.createdConnections.get(0);
+        assertNotSame("the per-user connection must not be the shared one", client.connection, userClient.connection);
+        assertSame(userConnection, userClient.connection);
+        assertEquals("the per-user connection must be impersonating that user", List.of("user-1"), userConnection.asUserCalls);
+        assertEquals("the shared connection settings must reach the per-user connection too", 7,
+                userClient.connection.getMaxRetryAttempts());
+    }
+
+    @Test
+    public void test_createConnection_rebuildReAppliesImpersonation() {
+        // The 401 retry loop rebuilds the connection mid-crawl. If the rebuild dropped the
+        // As-User header, every request after it would silently run as the enterprise service
+        // account - a per-user crawl indexing files under the wrong identity.
+        final SeamBoxClient userClient = newSeamClient();
+        userClient.impersonatedUserId = "user-1";
+
+        userClient.createConnection();
+
+        assertEquals(1, userClient.createdConnections.size());
+        assertEquals("a rebuilt connection must re-apply the impersonation", List.of("user-1"),
+                userClient.createdConnections.get(0).asUserCalls);
+        assertSame(userClient.createdConnections.get(0), userClient.connection);
+        assertNull("a per-user client must not schedule its own token refresh task", userClient.refreshTokenTask);
+    }
+
+    @Test
+    public void test_createConnection_serviceAccountIsNotImpersonated() {
+        // The complement: the service-account client must stay itself.
+        final SeamBoxClient client = newSeamClient();
+
+        client.createConnection();
+
+        try {
+            assertEquals(1, client.createdConnections.size());
+            assertEquals("the service-account connection must never be impersonated", List.of(),
+                    client.createdConnections.get(0).asUserCalls);
+            assertNotNull("the service-account client keeps the belt-and-braces refresh timer", client.refreshTokenTask);
+        } finally {
+            client.close();
+        }
     }
 
     /**

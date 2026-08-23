@@ -43,6 +43,7 @@ import java.util.function.Consumer;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codelibs.fess.Constants;
 import org.codelibs.fess.crawler.exception.CrawlingAccessException;
 import org.codelibs.fess.crawler.filter.UrlFilter;
 import org.codelibs.fess.crawler.extractor.ExtractorFactory;
@@ -256,9 +257,20 @@ public class BoxDataStoreTest extends UnitDsTestCase {
                 "created_at", "modified_at", "trashed_at", "purged_at", "content_created_at", "content_modified_at", "created_by",
                 "modified_by", "owned_by", "shared_link", "parent", "item_status", "sequence_id", "file_version", "version_number",
                 "comment_count", "permissions", "tags", "lock", "extension", "is_package", "has_collaborations", "watermark_info",
-                "collections", "representations" }) {
+                "collections" }) {
             assertTrue(required + " must be requested via fields", fields.contains(required));
         }
+    }
+
+    @Test
+    public void test_defaultFields_omitsRepresentations() {
+        // The SDK populates representations only through
+        // BoxFile#getInfoWithRepresentations(repHints, fields), which sends the X-Rep-Hints header
+        // Box requires; buildFileMap calls the plain getInfo(fields), which never sends it.
+        // Requesting the field therefore inflates every GET /files/{id} response for a value that
+        // can never arrive - and nothing maps it any more.
+        assertFalse("representations cannot be populated by getInfo(fields), so it must not be requested",
+                Arrays.asList(BoxDataStore.DEFAULT_FIELDS).contains("representations"));
     }
 
     @Test
@@ -378,22 +390,22 @@ public class BoxDataStoreTest extends UnitDsTestCase {
     }
 
     @Test
-    public void test_isEffectiveCollaboration_acceptsOnlyReadableAccepted() {
-        assertTrue(BoxDataStore.BoxFileAPI.isEffectiveCollaboration(BoxCollaboration.Status.ACCEPTED, BoxCollaboration.Role.VIEWER));
-        assertTrue(BoxDataStore.BoxFileAPI.isEffectiveCollaboration(BoxCollaboration.Status.ACCEPTED, BoxCollaboration.Role.EDITOR));
-        assertTrue(BoxDataStore.BoxFileAPI.isEffectiveCollaboration(BoxCollaboration.Status.ACCEPTED, BoxCollaboration.Role.CO_OWNER));
-        assertTrue(BoxDataStore.BoxFileAPI.isEffectiveCollaboration(BoxCollaboration.Status.ACCEPTED, BoxCollaboration.Role.PREVIEWER));
+    public void test_boxFileAPI_loadsCollaborationsOnlyWhenAsked() {
+        // file.api is put on every file document, but only a script that actually calls it needs
+        // the collaborations. Loading them in the constructor issued one extra
+        // GET /files/{id}/collaborations per file whenever debug logging was on - and it is on in
+        // this test environment, so an eager load would show up here as a non-zero count.
+        assertTrue("this test is only meaningful while debug logging is enabled",
+                LogManager.getLogger(BoxDataStore.class).isDebugEnabled());
+        final FakeBoxFile file = new FakeBoxFile("file-1", "{\"type\":\"file\",\"id\":\"file-1\"}");
 
-        // Uploader cannot preview or download, so it must not grant search access.
-        assertFalse(BoxDataStore.BoxFileAPI.isEffectiveCollaboration(BoxCollaboration.Status.ACCEPTED, BoxCollaboration.Role.UPLOADER));
+        final BoxDataStore.BoxFileAPI api = new BoxDataStore.BoxFileAPI(file);
 
-        // Pending and rejected collaborators have no access yet.
-        assertFalse(BoxDataStore.BoxFileAPI.isEffectiveCollaboration(BoxCollaboration.Status.PENDING, BoxCollaboration.Role.EDITOR));
-        assertFalse(BoxDataStore.BoxFileAPI.isEffectiveCollaboration(BoxCollaboration.Status.REJECTED, BoxCollaboration.Role.EDITOR));
+        assertEquals("constructing file.api must not issue a collaborations request", 0, file.collaborationCalls);
 
-        // Missing values must not grant access.
-        assertFalse(BoxDataStore.BoxFileAPI.isEffectiveCollaboration(null, BoxCollaboration.Role.EDITOR));
-        assertFalse(BoxDataStore.BoxFileAPI.isEffectiveCollaboration(BoxCollaboration.Status.ACCEPTED, null));
+        api.getAllFileCollaborations();
+
+        assertEquals("the first script-level use must load them lazily", 1, file.collaborationCalls);
     }
 
     @Test
@@ -546,6 +558,82 @@ public class BoxDataStoreTest extends UnitDsTestCase {
         assertEquals("releaseCrawled must be called for the degraded file", List.of(fileKey), recordingStore.releasedIds);
     }
 
+    @Test
+    public void test_storeFile_statsKeyUsesBareIdWhileDedupClaimStaysNamespaced() {
+        // The crawler_stats key is a published format: master emitted the bare Box id, and the
+        // namespaced "file:<id>" key this branch introduced for the dedup claim must not leak
+        // into it. Both are pinned here so neither can drift onto the other.
+        ComponentUtil.register(new SystemHelper(), "systemHelper");
+        final CrawlerStatsHelper crawlerStatsHelper = new CrawlerStatsHelper();
+        crawlerStatsHelper.init();
+        ComponentUtil.register(crawlerStatsHelper, "crawlerStatsHelper");
+        ComponentUtil.register(new FileTypeHelper(), "fileTypeHelper");
+
+        final RecordingBoxDataStore recordingStore = new RecordingBoxDataStore();
+        final Set<String> crawledIds = ConcurrentHashMap.newKeySet();
+        final String fileKey = BoxDataStore.itemKey(BoxClient.ITEM_TYPE_FILE, "file-1");
+        recordingStore.markCrawled(crawledIds, fileKey);
+
+        final String infoJson = "{\"type\":\"file\",\"id\":\"file-1\",\"name\":\"test.txt\",\"size\":100,"
+                + "\"has_collaborations\":false,\"path_collection\":{\"total_count\":0,\"entries\":[]}}";
+        final FakeBoxFile file = new FakeBoxFile("file-1", infoJson);
+        // A swallowed content failure, so the run also reaches the claim release below.
+        final ThrowingContentBoxClient client = new ThrowingContentBoxClient();
+        final BoxAclResolver aclResolver = new BoxAclResolver(List.of(), null);
+        final DataStoreParams paramMap = new DataStoreParams();
+        final BoxDataStore.Config config = new BoxDataStore.Config(paramMap);
+
+        recordingStore.storeFile(new DataConfig(), new TestCallback() {
+            @Override
+            void test(final DataStoreParams p, final Map<String, Object> dataMap) {
+            }
+        }, config, paramMap, new HashMap<>(), new HashMap<>(), client, aclResolver, crawledIds, file);
+
+        final Object statsKey = paramMap.get(Constants.CRAWLER_STATS_KEY);
+        assertNotNull("storeItem must publish a stats key", statsKey);
+        assertEquals("crawler_stats must keep the bare Box id it carried before the dedup key existed", "file-1",
+                ((StatsKeyObject) statsKey).getId());
+        assertEquals("the dedup claim must stay namespaced", List.of(fileKey), recordingStore.releasedIds);
+    }
+
+    @Test
+    public void test_storeFolder_statsKeyUsesBareIdWhileDedupClaimStaysNamespaced() {
+        ComponentUtil.register(new SystemHelper(), "systemHelper");
+        final CrawlerStatsHelper crawlerStatsHelper = new CrawlerStatsHelper();
+        crawlerStatsHelper.init();
+        ComponentUtil.register(crawlerStatsHelper, "crawlerStatsHelper");
+
+        final RecordingBoxDataStore recordingStore = new RecordingBoxDataStore();
+        final Set<String> crawledIds = ConcurrentHashMap.newKeySet();
+        final String folderKey = BoxDataStore.itemKey(BoxClient.ITEM_TYPE_FOLDER, "folder-1");
+        recordingStore.markCrawled(crawledIds, folderKey);
+
+        final String infoJson = "{\"type\":\"folder\",\"id\":\"folder-1\",\"name\":\"Projects\","
+                + "\"path_collection\":{\"total_count\":0,\"entries\":[]}}";
+        final FakeBoxFolder folder = new FakeBoxFolder("folder-1", infoJson);
+        // A failing folder collaboration lookup, so the run also reaches the claim release below.
+        final BoxClient client = new MockBoxClient() {
+            @Override
+            public Collection<BoxCollaboration.Info> getFolderCollaborations(final String folderId) {
+                throw new RuntimeException("simulated folder collaboration lookup failure");
+            }
+        };
+        final BoxAclResolver aclResolver = new BoxAclResolver(List.of(), null);
+        final DataStoreParams paramMap = new DataStoreParams();
+        final BoxDataStore.Config config = new BoxDataStore.Config(paramMap);
+
+        recordingStore.storeFolder(new DataConfig(), new TestCallback() {
+            @Override
+            void test(final DataStoreParams p, final Map<String, Object> dataMap) {
+            }
+        }, config, paramMap, new HashMap<>(), new HashMap<>(), client, aclResolver, crawledIds, folder);
+
+        final Object statsKey = paramMap.get(Constants.CRAWLER_STATS_KEY);
+        assertNotNull("storeItem must publish a stats key", statsKey);
+        assertEquals("crawler_stats must keep the bare Box id", "folder-1", ((StatsKeyObject) statsKey).getId());
+        assertEquals("the dedup claim must stay namespaced", List.of(folderKey), recordingStore.releasedIds);
+    }
+
     // --- matchesUrlFilter: the shared skip logic buildFileMap and buildFolderMap both use ---
 
     @Test
@@ -628,18 +716,28 @@ public class BoxDataStoreTest extends UnitDsTestCase {
 
     @Test
     public void test_defaultFolderFields_excludesFileOnlyNames() {
-        // getChildren(fields) tolerating DEFAULT_FIELDS' file-only names is not evidence that a
-        // single-folder GET /folders/{id} does too - getChildren legitimately spans both item
-        // types, a single-folder fetch does not.
+        // DEFAULT_FIELDS is file-shaped and carries names a folder object does not have; a
+        // single-folder GET /folders/{id} must not be asked for them.
         final List<String> folderFields = Arrays.asList(BoxDataStore.DEFAULT_FOLDER_FIELDS);
         for (final String fileOnly : new String[] { "sha1", "file_version", "version_number", "comment_count", "lock", "extension",
                 "is_package", "representations" }) {
             assertFalse(fileOnly + " is file-only and must not be requested for a folder", folderFields.contains(fileOnly));
         }
-        // The four fields BoxAclResolver's folder role resolution needs must still be requested.
-        for (final String needed : new String[] { "has_collaborations", "path_collection", "owned_by", "shared_link" }) {
+        // The three fields BoxAclResolver's folder role resolution needs must still be requested.
+        for (final String needed : new String[] { "path_collection", "owned_by", "shared_link" }) {
             assertTrue(needed + " is required by BoxAclResolver and must still be requested for a folder", folderFields.contains(needed));
         }
+    }
+
+    @Test
+    public void test_defaultFolderFields_omitsHasCollaborations() {
+        // has_collaborations is a real folder field, but nothing reads it for a folder.
+        // BoxFolder.Info#getHasCollaborations() returns a primitive boolean, so it could never
+        // carry the "unknown" state BoxAclResolver.hasCollaborations is built on - that check is
+        // on the file path, where BoxFile.Info returns a nullable Boolean - and a folder's own
+        // collaborations are read unconditionally through the folder role cache.
+        assertFalse("has_collaborations must not be requested for a folder: nothing reads it",
+                Arrays.asList(BoxDataStore.DEFAULT_FOLDER_FIELDS).contains("has_collaborations"));
     }
 
     @Test
@@ -772,6 +870,39 @@ public class BoxDataStoreTest extends UnitDsTestCase {
     }
 
     @Test
+    public void test_crawlFolder_listingRequestsMinimalFieldsNotConfigFields() {
+        // The listing's results are discarded - every entry becomes a bare BoxFile/BoxFolder by
+        // id and both consumers re-fetch - so anything beyond type/id/name inflates every
+        // GET /folders/{id}/items response for nothing. Worse, getFiles retries only 401, so a
+        // 400 from a name that endpoint rejects would propagate out of storeData and abort the
+        // whole crawl on the default configuration.
+        final RecordingGetFilesBoxClient client = new RecordingGetFilesBoxClient();
+        final DataStoreParams paramMap = new DataStoreParams();
+        final BoxDataStore.Config config = new BoxDataStore.Config(paramMap);
+        final BoxAclResolver aclResolver = new BoxAclResolver(List.of(), null);
+        final ExecutorService executorService = Executors.newSingleThreadExecutor();
+        try {
+            dataStore.crawlFolder(new DataConfig(), new TestCallback() {
+                @Override
+                void test(final DataStoreParams p, final Map<String, Object> dataMap) {
+                }
+            }, config, paramMap, new HashMap<>(), new HashMap<>(), client, new FakeBoxFolder("root", "{}"), aclResolver,
+                    ConcurrentHashMap.newKeySet(), executorService, 0L);
+        } finally {
+            executorService.shutdownNow();
+        }
+
+        assertEquals("the folder listing must request only the names the traversal reads", Arrays.asList(BoxDataStore.LISTING_FIELDS),
+                Arrays.asList(client.capturedFields));
+        // config.fields defaults to the 33-name file list; not one of its file-shaped extras may
+        // reach the items endpoint.
+        for (final String fileOnly : new String[] { "path_collection", "sha1", "file_version", "has_collaborations" }) {
+            assertFalse(fileOnly + " must not be sent to the folder-listing endpoint",
+                    Arrays.asList(client.capturedFields).contains(fileOnly));
+        }
+    }
+
+    @Test
     public void test_crawlFolder_ignoreFolderFalse_passesNonNullFolderConsumer() {
         final RecordingGetFilesBoxClient client = new RecordingGetFilesBoxClient();
         final DataStoreParams paramMap = new DataStoreParams();
@@ -867,6 +998,54 @@ public class BoxDataStoreTest extends UnitDsTestCase {
         assertEquals("alive=false must block the first folder, and the duplicate second folder-1 must be blocked by markCrawled - "
                 + "only one storeFolder call may reach the executor", List.of("folder-1"), store.storedFolderIds);
         assertEquals("the read_interval throttle must run exactly once, for the single accepted folder", 1, store.sleepCalls.get());
+    }
+
+    // --- crawlUserFolders: the per-user identity hand-off ---
+
+    @Test
+    public void test_crawlUserFolders_everyUserIsCrawledWithItsOwnClientNotTheSharedOne() {
+        // The central claim of the executor redesign: asUser() is never called on a shared
+        // connection again. Every user's walk must run through the client forUser() handed out
+        // for that user, walking that client's own root folder - never through the
+        // service-account client crawlUserFolders was given.
+        final TwoUserBoxClient client = new TwoUserBoxClient();
+        final UserCrawlRecordingBoxDataStore store = new UserCrawlRecordingBoxDataStore();
+        final DataStoreParams paramMap = new DataStoreParams();
+        final BoxDataStore.Config config = new BoxDataStore.Config(paramMap);
+
+        store.crawlUserFolders(new DataConfig(), new TestCallback() {
+            @Override
+            void test(final DataStoreParams p, final Map<String, Object> dataMap) {
+            }
+        }, config, paramMap, new HashMap<>(), new HashMap<>(), client);
+
+        assertEquals("every enumerated user must be impersonated", List.of("u1", "u2"), client.forUserCalls);
+        assertEquals("every user must reach crawlFolder", 2, store.crawlClients.size());
+        assertSame("user u1 must be crawled with its own client", client.userClients.get("u1"), store.crawlClients.get(0));
+        assertSame("user u2 must be crawled with its own client", client.userClients.get("u2"), store.crawlClients.get(1));
+        assertNotSame("the shared service-account client must never crawl a user's folders", client, store.crawlClients.get(0));
+        assertNotSame("the shared service-account client must never crawl a user's folders", client, store.crawlClients.get(1));
+        assertEquals("each user's walk must start from that user's own root folder", List.of("root-u1", "root-u2"), store.crawlFolderIds);
+    }
+
+    @Test
+    public void test_crawlUserFolders_aliveFalse_skipsEveryUserWithoutImpersonating() {
+        // The alive check guards the consumer body, so a stop request must prevent even the
+        // forUser() token work, not just the crawl.
+        final TwoUserBoxClient client = new TwoUserBoxClient();
+        final UserCrawlRecordingBoxDataStore store = new UserCrawlRecordingBoxDataStore();
+        store.setAliveForTest(false);
+        final DataStoreParams paramMap = new DataStoreParams();
+        final BoxDataStore.Config config = new BoxDataStore.Config(paramMap);
+
+        store.crawlUserFolders(new DataConfig(), new TestCallback() {
+            @Override
+            void test(final DataStoreParams p, final Map<String, Object> dataMap) {
+            }
+        }, config, paramMap, new HashMap<>(), new HashMap<>(), client);
+
+        assertEquals("a stop request must skip impersonation entirely", List.of(), client.forUserCalls);
+        assertEquals("a stop request must skip every user's crawl", List.of(), store.crawlFolderIds);
     }
 
     // --- crawlRootFolder / storeData: the root_folder_id dispatch ---
@@ -1091,6 +1270,8 @@ public class BoxDataStoreTest extends UnitDsTestCase {
      */
     static class FakeBoxFile extends BoxFile {
         private final String infoJson;
+        /** How many times a collaboration listing was requested for this file. */
+        int collaborationCalls;
 
         FakeBoxFile(final String id, final String infoJson) {
             super(null, id);
@@ -1113,9 +1294,10 @@ public class BoxDataStoreTest extends UnitDsTestCase {
 
         @Override
         public com.box.sdk.BoxResourceIterable<BoxCollaboration.Info> getAllFileCollaborations(final String... fields) {
-            // BoxDataStore.BoxFileAPI's constructor only calls this when debug logging is
-            // enabled (it is, in this test environment); the real BoxFile implementation needs
-            // a live BoxAPIConnection, which this fake file has none of.
+            // The real BoxFile implementation needs a live BoxAPIConnection, which this fake file
+            // has none of. Counted so a test can pin that BoxDataStore.BoxFileAPI never issues
+            // this request until a script actually asks for the collaborations.
+            collaborationCalls++;
             return null;
         }
     }
@@ -1228,6 +1410,70 @@ public class BoxDataStoreTest extends UnitDsTestCase {
             capturedFields = fields;
             capturedFileConsumer = fileConsumer;
             capturedFolderConsumer = folderConsumer;
+        }
+    }
+
+    /**
+     * A service-account {@link BoxClient} that enumerates two enterprise users and hands out a
+     * distinct, recorded per-user client for each, so {@link BoxDataStore#crawlUserFolders}'s
+     * consumer body can be driven without any real Box API access.
+     */
+    static class TwoUserBoxClient extends MockBoxClient {
+        final Map<String, BoxClient> userClients = new LinkedHashMap<>();
+        final List<String> forUserCalls = new ArrayList<>();
+
+        @Override
+        public void getUsers(final String filterTerm, final Consumer<BoxUser.Info> consumer) {
+            consumer.accept(new BoxUser(null, "u1").new Info("{\"type\":\"user\",\"id\":\"u1\"}"));
+            consumer.accept(new BoxUser(null, "u2").new Info("{\"type\":\"user\",\"id\":\"u2\"}"));
+        }
+
+        @Override
+        public BoxClient forUser(final String userId) {
+            forUserCalls.add(userId);
+            final BoxClient userClient = new UserRootBoxClient(userId);
+            userClients.put(userId, userClient);
+            return userClient;
+        }
+    }
+
+    /**
+     * A per-user {@link BoxClient} whose root folder is canned and carries the user id, so a test
+     * can tell which user's tree a crawl was actually started from.
+     */
+    static class UserRootBoxClient extends MockBoxClient {
+        private final String userId;
+
+        UserRootBoxClient(final String userId) {
+            this.userId = userId;
+        }
+
+        @Override
+        public BoxFolder getRootFolder() {
+            return new FakeBoxFolder("root-" + userId, "{}");
+        }
+    }
+
+    /**
+     * A BoxDataStore that records which client and which root folder each {@link #crawlFolder}
+     * was handed, without running the real walk.
+     */
+    static class UserCrawlRecordingBoxDataStore extends BoxDataStore {
+        final List<BoxClient> crawlClients = new java.util.concurrent.CopyOnWriteArrayList<>();
+        final List<String> crawlFolderIds = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+        @Override
+        protected void crawlFolder(final DataConfig dataConfig, final IndexUpdateCallback callback, final Config config,
+                final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
+                final BoxClient client, final BoxFolder rootFolder, final BoxAclResolver aclResolver, final Set<String> crawledIds,
+                final ExecutorService executorService, final long readInterval) {
+            crawlClients.add(client);
+            crawlFolderIds.add(rootFolder.getID());
+        }
+
+        /** See {@link RecordingStoreBoxDataStore#setAliveForTest(boolean)} for why this wrapper is needed. */
+        void setAliveForTest(final boolean value) {
+            this.alive = value;
         }
     }
 

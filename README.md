@@ -50,7 +50,7 @@ script can never read a credential back.
 
 | Parameter | Default | Description |
 | --- | --- | --- |
-| `fields` | *(built-in list)* | Comma-separated Box API fields requested for each file, and used when listing a folder's children. Box returns only the fields it is explicitly asked for once a list is supplied, so an override must still cover everything the scripts below use. A folder's own document (see `ignore_folder`) always requests its own fixed, folder-appropriate field list, not this one. |
+| `fields` | *(built-in list)* | Comma-separated Box API fields requested for each file. Box returns only the fields it is explicitly asked for once a list is supplied, so an override must still cover everything the scripts below use. This list applies to a file's own document only: listing a folder's children always requests a minimal fixed list (the listing's results are discarded and re-fetched), and a folder's own document (see `ignore_folder`) always requests its own fixed, folder-appropriate list. |
 | `max_size` | `10000000` (~10MB) | Files larger than this many bytes are skipped rather than indexed. |
 | `ignore_folder` | `true` | When `true`, only files are indexed, as before. When `false`, every descendant folder is indexed as its own document too - see [Behaviour changes](#behaviour-changes-in-this-release). |
 | `ignore_error` | `true` | When `true`, a content-extraction failure indexes the document with empty content instead of failing the crawl. |
@@ -129,6 +129,21 @@ when the document being processed is a folder, and the crawler records that as a
 entry for the folder. This only matters once you set `ignore_folder=false`: a script still using
 `file.api` needs to guard the call - for example, only invoke it when `file.type == "file"` -
 or every folder in the crawl will generate a failure-URL entry.
+
+#### Known limitation: a folder's collaborations are read once, by one user
+
+Every enterprise user is crawled in turn, and a folder's collaboration list is read the first
+time any user's walk reaches that folder; the result is then reused for every other user's files
+under it. This assumes Box returns the same collaboration list to every caller who can read the
+folder. That is unverified. Box can narrow what a given caller sees - a non-owner, or a folder
+with `can_non_owners_view_collaborators` disabled - and a narrowed read still succeeds, so
+nothing warns and nothing retries.
+
+If it does happen, the symptom is that some documents come out with fewer roles than expected,
+and which documents they are changes between crawls, because it depends on the order Box
+enumerates users in. There is no workaround inside the plugin today; `default_permissions` can be
+used to guarantee a floor of access, and `root_folder_id` sidesteps the question entirely by
+crawling one folder as the service account.
 
 ### Behaviour changes in this release
 

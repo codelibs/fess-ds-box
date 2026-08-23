@@ -53,6 +53,25 @@ public class BoxAclResolverTest {
     }
 
     @Test
+    public void test_isEffectiveCollaboration_acceptsOnlyReadableAccepted() {
+        assertTrue(BoxAclResolver.isEffectiveCollaboration(BoxCollaboration.Status.ACCEPTED, BoxCollaboration.Role.VIEWER));
+        assertTrue(BoxAclResolver.isEffectiveCollaboration(BoxCollaboration.Status.ACCEPTED, BoxCollaboration.Role.EDITOR));
+        assertTrue(BoxAclResolver.isEffectiveCollaboration(BoxCollaboration.Status.ACCEPTED, BoxCollaboration.Role.CO_OWNER));
+        assertTrue(BoxAclResolver.isEffectiveCollaboration(BoxCollaboration.Status.ACCEPTED, BoxCollaboration.Role.PREVIEWER));
+
+        // Uploader cannot preview or download, so it must not grant search access.
+        assertFalse(BoxAclResolver.isEffectiveCollaboration(BoxCollaboration.Status.ACCEPTED, BoxCollaboration.Role.UPLOADER));
+
+        // Pending and rejected collaborators have no access yet.
+        assertFalse(BoxAclResolver.isEffectiveCollaboration(BoxCollaboration.Status.PENDING, BoxCollaboration.Role.EDITOR));
+        assertFalse(BoxAclResolver.isEffectiveCollaboration(BoxCollaboration.Status.REJECTED, BoxCollaboration.Role.EDITOR));
+
+        // Missing values must not grant access.
+        assertFalse(BoxAclResolver.isEffectiveCollaboration(null, BoxCollaboration.Role.EDITOR));
+        assertFalse(BoxAclResolver.isEffectiveCollaboration(BoxCollaboration.Status.ACCEPTED, null));
+    }
+
+    @Test
     public void test_hasCollaborations_true() {
         assertTrue(BoxAclResolver.hasCollaborations(Boolean.TRUE));
     }

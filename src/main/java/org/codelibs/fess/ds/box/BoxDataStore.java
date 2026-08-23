@@ -54,13 +54,11 @@ import org.codelibs.fess.helper.CrawlerStatsHelper;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsAction;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsKeyObject;
 import org.codelibs.fess.helper.PermissionHelper;
-import org.codelibs.fess.helper.SystemHelper;
 import org.codelibs.fess.opensearch.config.exentity.DataConfig;
 import org.codelibs.fess.util.ComponentUtil;
 import org.lastaflute.di.core.exception.ComponentNotFoundException;
 
 import com.box.sdk.BoxCollaboration;
-import com.box.sdk.BoxCollaborator.Info;
 import com.box.sdk.BoxFile;
 import com.box.sdk.BoxFolder;
 import com.box.sdk.BoxItem;
@@ -130,15 +128,40 @@ public class BoxDataStore extends AbstractDataStore {
     protected static final String FILE_ROLES = "roles";
 
     /**
-     * Fields requested from the Box API. Box omits every field that is not asked
-     * for once an explicit field list is supplied, so this must cover everything
-     * the crawler maps.
+     * Fields requested when fetching a single file's own info
+     * ({@code buildFileMap}'s {@code file.getInfo(...)} call). Box omits every field that is not
+     * asked for once an explicit field list is supplied, so this must cover everything the
+     * crawler maps.
+     *
+     * <p>Deliberately not used for the folder listing - see {@link #LISTING_FIELDS} - nor for a
+     * folder's own info - see {@link #DEFAULT_FOLDER_FIELDS}.</p>
+     *
+     * <p>{@code representations} is deliberately absent: the SDK can only populate it through
+     * {@code BoxFile#getInfoWithRepresentations(String, String...)}, which sends the
+     * {@code X-Rep-Hints} header that Box requires; the plain {@code getInfo(fields)} this
+     * crawler calls never sends it, so asking for the field would only inflate the response.
+     * Real Representations support is a separate, opt-in feature.</p>
      */
     protected static final String[] DEFAULT_FIELDS =
             { "type", "id", "etag", "sha1", "name", "description", "size", "path_collection", "created_at", "modified_at", "trashed_at",
                     "purged_at", "content_created_at", "content_modified_at", "created_by", "modified_by", "owned_by", "shared_link",
                     "parent", "item_status", "sequence_id", "file_version", "version_number", "comment_count", "permissions", "tags",
-                    "lock", "extension", "is_package", "has_collaborations", "watermark_info", "collections", "representations" };
+                    "lock", "extension", "is_package", "has_collaborations", "watermark_info", "collections" };
+
+    /**
+     * Fields requested when listing a folder's children
+     * ({@code BoxClient#getFiles}'s {@code folder.getChildren(fields)} call).
+     *
+     * <p>The listing's results are discarded: every entry is turned straight back into a bare
+     * {@link BoxFile} or {@link BoxFolder} by id, and both consumers re-fetch what they need
+     * ({@code file.getInfo(config.fields)} and {@code folder.getInfo(DEFAULT_FOLDER_FIELDS)}).
+     * Only the type, the id and - for the debug log line - the name are ever read, so sending
+     * anything more would inflate every {@code GET /folders/{id}/items} response for nothing,
+     * while risking a {@code 400} on an endpoint that lists files and folders together. Such a
+     * {@code 400} is not retried by {@code getFiles}, which handles only {@code 401}, so it would
+     * propagate all the way out of {@code storeData} and abort the whole crawl.</p>
+     */
+    protected static final String[] LISTING_FIELDS = { "type", "id", "name" };
 
     /**
      * Fields requested from the Box API when fetching a single folder's own info
@@ -146,19 +169,21 @@ public class BoxDataStore extends AbstractDataStore {
      *
      * <p>Deliberately not {@link #DEFAULT_FIELDS}: that list includes file-only names -
      * {@code sha1}, {@code file_version}, {@code version_number}, {@code comment_count},
-     * {@code lock}, {@code extension}, {@code is_package}, {@code representations} - that a
-     * folder object does not have. {@code getChildren(fields)} tolerating {@link #DEFAULT_FIELDS}
-     * (it must, since a single traversal call lists both files and folders together) is not
-     * evidence that a single-folder {@code GET /folders/{id}} tolerates the same list; nothing in
-     * this plugin has been run against a live tenant to settle that question, so this list keeps
-     * only the names a folder is documented to have, including the four the ACL resolver needs:
-     * {@code has_collaborations}, {@code path_collection}, {@code owned_by} and
-     * {@code shared_link}.</p>
+     * {@code lock}, {@code extension}, {@code is_package} - that a folder object does not have.
+     * Nothing in this plugin has been run against a live tenant, so this list keeps only the
+     * names a folder is documented to have, including the three the ACL resolver needs:
+     * {@code path_collection}, {@code owned_by} and {@code shared_link}.</p>
+     *
+     * <p>{@code has_collaborations} is deliberately absent: nothing reads it for a folder.
+     * {@code BoxFolder.Info#getHasCollaborations()} returns a primitive {@code boolean}, so it
+     * could never carry the "unknown" state the file path's {@link BoxAclResolver#hasCollaborations}
+     * check is built on, and a folder's own collaborations are read unconditionally through the
+     * folder role cache.</p>
      */
     protected static final String[] DEFAULT_FOLDER_FIELDS =
             { "type", "id", "etag", "name", "description", "size", "path_collection", "created_at", "modified_at", "trashed_at",
                     "purged_at", "content_created_at", "content_modified_at", "created_by", "modified_by", "owned_by", "shared_link",
-                    "parent", "item_status", "sequence_id", "permissions", "tags", "has_collaborations", "watermark_info", "collections" };
+                    "parent", "item_status", "sequence_id", "permissions", "tags", "watermark_info", "collections" };
 
     /**
      * Parameter keys that must never reach the script evaluation context.
@@ -247,8 +272,6 @@ public class BoxDataStore extends AbstractDataStore {
     protected static final String FILE_METADATA = "metadata";
     /** Key for the item's collections. */
     protected static final String FILE_COLLECTIONS = "collections";
-    /** Key for the file's representations. */
-    protected static final String FILE_REPRESENTATIONS = "representations";
 
     /** The name of the extractor to use for file content. */
     protected String extractorName = "tikaExtractor";
@@ -402,7 +425,10 @@ public class BoxDataStore extends AbstractDataStore {
             final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final BoxClient client, final BoxFolder rootFolder, final BoxAclResolver aclResolver, final Set<String> crawledIds,
             final ExecutorService executorService, final long readInterval) {
-        client.getFiles(rootFolder, config.fields, file -> {
+        // LISTING_FIELDS, not config.fields: the listing's own results are discarded and both
+        // consumers re-fetch, so anything beyond type/id/name would only inflate every
+        // GET /folders/{id}/items response - see LISTING_FIELDS.
+        client.getFiles(rootFolder, LISTING_FIELDS, file -> {
             if (!alive) {
                 return;
             }
@@ -555,12 +581,16 @@ public class BoxDataStore extends AbstractDataStore {
      * @param scriptMap The script mapping.
      * @param defaultDataMap The default data map.
      * @param crawledIds The set of item IDs already successfully crawled in this crawl session.
-     * @param itemId The id of the item being stored, used as the stats key and dedup claim.
+     * @param itemId The item's own Box id, used as the crawler stats key. Deliberately the bare
+     *        id and not {@code itemKey}: the stats key ends up in {@code crawler_stats}, whose
+     *        format anyone may be parsing, and it carried the bare id before this plugin needed a
+     *        dedup claim that spans two item types.
+     * @param itemKey The dedup claim held in {@code crawledIds}, from {@link #itemKey}.
      * @param mapBuilder Builds the item's data map, or signals a skip by returning {@code null}.
      */
     protected void storeItem(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap, final Set<String> crawledIds,
-            final String itemId, final ItemMapBuilder mapBuilder) {
+            final String itemId, final String itemKey, final ItemMapBuilder mapBuilder) {
         final CrawlerStatsHelper crawlerStatsHelper = ComponentUtil.getCrawlerStatsHelper();
         final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
         final StatsKeyObject statsKey = new StatsKeyObject(itemId);
@@ -603,10 +633,10 @@ public class BoxDataStore extends AbstractDataStore {
             callback.store(paramMap, dataMap);
             crawlerStatsHelper.record(statsKey, StatsAction.FINISHED);
             if (quality.isDegraded()) {
-                releaseCrawled(crawledIds, itemId);
+                releaseCrawled(crawledIds, itemKey);
             }
         } catch (final CrawlingAccessException e) {
-            releaseCrawled(crawledIds, itemId);
+            releaseCrawled(crawledIds, itemKey);
             logger.warn("Crawling Access Exception at : {}", dataMap, e);
 
             Throwable target = e;
@@ -629,7 +659,7 @@ public class BoxDataStore extends AbstractDataStore {
             failureUrlService.store(dataConfig, errorName, "", target);
             crawlerStatsHelper.record(statsKey, StatsAction.ACCESS_EXCEPTION);
         } catch (final Throwable t) {
-            releaseCrawled(crawledIds, itemId);
+            releaseCrawled(crawledIds, itemKey);
             logger.warn("Crawling Access Exception at : {}", dataMap, t);
             final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
             failureUrlService.store(dataConfig, t.getClass().getCanonicalName(), "", t);
@@ -656,9 +686,9 @@ public class BoxDataStore extends AbstractDataStore {
     protected void storeFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final Config config,
             final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final BoxClient client, final BoxAclResolver aclResolver, final Set<String> crawledIds, final BoxFile file) {
-        storeItem(dataConfig, callback, paramMap, scriptMap, defaultDataMap, crawledIds, itemKey(BoxClient.ITEM_TYPE_FILE, file.getID()),
-                (crawlerStatsHelper, statsKey, quality) -> buildFileMap(config, client, aclResolver, defaultDataMap, crawlerStatsHelper,
-                        statsKey, quality, file));
+        storeItem(dataConfig, callback, paramMap, scriptMap, defaultDataMap, crawledIds, file.getID(),
+                itemKey(BoxClient.ITEM_TYPE_FILE, file.getID()), (crawlerStatsHelper, statsKey, quality) -> buildFileMap(config, client,
+                        aclResolver, defaultDataMap, crawlerStatsHelper, statsKey, quality, file));
     }
 
     /**
@@ -743,7 +773,6 @@ public class BoxDataStore extends AbstractDataStore {
         fileMap.put(FILE_IS_PACKAGE, info.getIsPackage());
         fileMap.put(FILE_IS_WATERMARK, info.getIsWatermarked());
         // fileMap.put(FILE_METADATA, file.getMetadata());
-        fileMap.put(FILE_REPRESENTATIONS, info.getRepresentations());
 
         fileMap.put(FILE_ROLES, aclResolver.getRoles(client, info, getBaseRoles(defaultDataMap), quality));
 
@@ -770,7 +799,7 @@ public class BoxDataStore extends AbstractDataStore {
     protected void storeFolder(final DataConfig dataConfig, final IndexUpdateCallback callback, final Config config,
             final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final BoxClient client, final BoxAclResolver aclResolver, final Set<String> crawledIds, final BoxFolder folder) {
-        storeItem(dataConfig, callback, paramMap, scriptMap, defaultDataMap, crawledIds,
+        storeItem(dataConfig, callback, paramMap, scriptMap, defaultDataMap, crawledIds, folder.getID(),
                 itemKey(BoxClient.ITEM_TYPE_FOLDER, folder.getID()),
                 (crawlerStatsHelper, statsKey, quality) -> buildFolderMap(config, client, aclResolver, defaultDataMap, quality, folder));
     }
@@ -794,9 +823,8 @@ public class BoxDataStore extends AbstractDataStore {
      */
     protected Map<String, Object> buildFolderMap(final Config config, final BoxClient client, final BoxAclResolver aclResolver,
             final Map<String, Object> defaultDataMap, final DocumentQuality quality, final BoxFolder folder) {
-        // Deliberately not config.fields: getChildren(fields) tolerating the file-heavy
-        // DEFAULT_FIELDS list is weak evidence that a single-folder GET /folders/{id} does too -
-        // getChildren legitimately spans both item types, a single-folder fetch does not.
+        // Deliberately not config.fields: that list is file-shaped and carries names a folder
+        // object does not have - see DEFAULT_FOLDER_FIELDS.
         final BoxFolder.Info info = folder.getInfo(DEFAULT_FOLDER_FIELDS);
         if (logger.isDebugEnabled()) {
             logger.debug("info: {}", info.getJson());
@@ -1224,13 +1252,19 @@ public class BoxDataStore extends AbstractDataStore {
 
         /**
          * Constructs a new BoxFileAPI instance.
+         *
+         * <p>Deliberately does no work: {@code file.api} is put on every file document, but only
+         * a script that actually calls it needs the collaborations. Loading them here issued one
+         * extra {@code GET /files/{id}/collaborations} per file whenever debug logging was on -
+         * exactly the per-file call this crawler resolves ACLs through
+         * {@link BoxAclResolver} to avoid, re-armed by the diagnostic an operator would turn on
+         * to investigate a slow crawl. {@link #getAllFileCollaborations()} loads them lazily and
+         * logs the same line.</p>
+         *
          * @param file The Box file to work with.
          */
         public BoxFileAPI(final BoxFile file) {
             this.file = file;
-            if (logger.isDebugEnabled()) {
-                loadCollaborations(file);
-            }
         }
 
         private void loadCollaborations(final BoxFile file) {
@@ -1261,70 +1295,23 @@ public class BoxDataStore extends AbstractDataStore {
         }
 
         /**
-         * Returns whether a collaboration grants read access that should be
-         * reflected in the search index.
-         *
-         * <p>Only accepted collaborations grant access at all; pending and rejected
-         * collaborators cannot open the file. The uploader role can neither preview
-         * nor download, so it must not grant search access either.</p>
-         *
-         * @param status the collaboration status
-         * @param role the collaboration role
-         * @return true if the collaboration should contribute a search role
-         */
-        static boolean isEffectiveCollaboration(final BoxCollaboration.Status status, final BoxCollaboration.Role role) {
-            return status == BoxCollaboration.Status.ACCEPTED && role != null && role != BoxCollaboration.Role.UPLOADER;
-        }
-
-        /**
          * Generates a list of Fess search roles based on the file's collaborations.
          * This allows mapping Box permissions to Fess search permissions.
+         *
+         * <p>Kept for backward compatibility with existing crawling scripts, but no longer a
+         * second implementation of the conversion: it delegates to
+         * {@link BoxAclResolver#toRoles}, so the status/role filter and the id-plus-login
+         * emission can only ever be changed in one place, on the same side of the
+         * ACL-correctness line as {@code file.roles}.</p>
+         *
          * @return A list of role strings.
          */
         public List<String> getCollaborationRoles() {
-            final SystemHelper systemHelper = ComponentUtil.getSystemHelper();
-            final List<String> roleList = new ArrayList<>();
-            final List<com.box.sdk.BoxCollaboration.Info> collaborationList = getAllFileCollaborations();
+            final List<BoxCollaboration.Info> collaborationList = getAllFileCollaborations();
             if (logger.isDebugEnabled()) {
                 logger.debug("collaborationList: {}", collaborationList.size());
             }
-            collaborationList.forEach(c -> {
-                if (!isEffectiveCollaboration(c.getStatus(), c.getRole())) {
-                    if (logger.isDebugEnabled()) {
-                        logger.debug("skipping collaboration: status={}, role={}", c.getStatus(), c.getRole());
-                    }
-                    return;
-                }
-                final Info accessibleBy = c.getAccessibleBy();
-                if (accessibleBy == null) {
-                    return;
-                }
-                if (logger.isDebugEnabled()) {
-                    logger.debug("accessibleBy: {}", accessibleBy.getJson());
-                }
-                switch (accessibleBy.getType()) {
-                case USER: {
-                    roleList.add(systemHelper.getSearchRoleByUser(accessibleBy.getID()));
-                    if (StringUtil.isNotBlank(accessibleBy.getLogin())) {
-                        roleList.add(systemHelper.getSearchRoleByUser(accessibleBy.getLogin()));
-                    }
-                    break;
-                }
-                case GROUP: {
-                    roleList.add(systemHelper.getSearchRoleByGroup(accessibleBy.getID()));
-                    if (StringUtil.isNotBlank(accessibleBy.getLogin())) {
-                        roleList.add(systemHelper.getSearchRoleByGroup(accessibleBy.getLogin()));
-                    }
-                    break;
-                }
-                default:
-                    if (logger.isDebugEnabled()) {
-                        logger.debug("unknown accessibleBy type: {}", accessibleBy.getType());
-                    }
-                    break;
-                }
-            });
-            return roleList;
+            return new BoxAclResolver(List.of(), null).toRoles(collaborationList);
         }
     }
 }
