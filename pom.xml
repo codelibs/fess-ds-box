@@ -18,7 +18,7 @@
 		<relativePath />
 	</parent>
 	<properties>
-		<box.version>4.0.1</box.version>
+		<box.version>5.15.0</box.version>
 	</properties>
 	<build>
 		<plugins>
@@ -155,6 +155,18 @@
 			<artifactId>utflute-lastaflute</artifactId>
 			<version>${utflute.version}</version>
 			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>com.fasterxml.jackson.core</groupId>
+			<artifactId>jackson-core</artifactId>
+			<version>${jackson.version}</version>
+			<scope>provided</scope>
+		</dependency>
+		<dependency>
+			<groupId>com.fasterxml.jackson.core</groupId>
+			<artifactId>jackson-databind</artifactId>
+			<version>${jackson.version}</version>
+			<scope>provided</scope>
 		</dependency>
 		<dependency>
 			<groupId>com.box</groupId>
