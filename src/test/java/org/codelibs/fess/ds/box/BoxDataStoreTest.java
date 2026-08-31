@@ -55,6 +55,7 @@ import org.codelibs.fess.helper.CrawlerStatsHelper.StatsKeyObject;
 import org.codelibs.fess.helper.FileTypeHelper;
 import org.codelibs.fess.helper.SystemHelper;
 import org.codelibs.fess.opensearch.config.exentity.DataConfig;
+import org.codelibs.fess.script.ScriptEngineFactory;
 import org.codelibs.fess.util.ComponentUtil;
 import org.codelibs.fess.ds.box.UnitDsTestCase;
 
@@ -583,16 +584,23 @@ public class BoxDataStoreTest extends UnitDsTestCase {
         final DataStoreParams paramMap = new DataStoreParams();
         final BoxDataStore.Config config = new BoxDataStore.Config(paramMap);
 
+        final List<DataStoreParams> storedParams = new ArrayList<>();
         recordingStore.storeFile(new DataConfig(), new TestCallback() {
             @Override
             void test(final DataStoreParams p, final Map<String, Object> dataMap) {
+                storedParams.add(p);
             }
         }, config, paramMap, new HashMap<>(), new HashMap<>(), client, aclResolver, crawledIds, file);
 
-        final Object statsKey = paramMap.get(Constants.CRAWLER_STATS_KEY);
+        // Read the key back from the parameters the callback was actually handed, not from the
+        // shared map: the shared map is exactly where it must no longer be written.
+        assertEquals("the degraded document is still stored, so there is one set of parameters to read", 1, storedParams.size());
+        final Object statsKey = storedParams.get(0).get(Constants.CRAWLER_STATS_KEY);
         assertNotNull("storeItem must publish a stats key", statsKey);
         assertEquals("crawler_stats must keep the bare Box id it carried before the dedup key existed", "file-1",
                 ((StatsKeyObject) statsKey).getId());
+        assertNull("the stats key belongs on the per-document copy, never on the map the workers share",
+                paramMap.get(Constants.CRAWLER_STATS_KEY));
         assertEquals("the dedup claim must stay namespaced", List.of(fileKey), recordingStore.releasedIds);
     }
 
@@ -622,16 +630,179 @@ public class BoxDataStoreTest extends UnitDsTestCase {
         final DataStoreParams paramMap = new DataStoreParams();
         final BoxDataStore.Config config = new BoxDataStore.Config(paramMap);
 
+        final List<DataStoreParams> storedParams = new ArrayList<>();
         recordingStore.storeFolder(new DataConfig(), new TestCallback() {
             @Override
             void test(final DataStoreParams p, final Map<String, Object> dataMap) {
+                storedParams.add(p);
             }
         }, config, paramMap, new HashMap<>(), new HashMap<>(), client, aclResolver, crawledIds, folder);
 
-        final Object statsKey = paramMap.get(Constants.CRAWLER_STATS_KEY);
+        assertEquals("the degraded document is still stored, so there is one set of parameters to read", 1, storedParams.size());
+        final Object statsKey = storedParams.get(0).get(Constants.CRAWLER_STATS_KEY);
         assertNotNull("storeItem must publish a stats key", statsKey);
         assertEquals("crawler_stats must keep the bare Box id", "folder-1", ((StatsKeyObject) statsKey).getId());
+        assertNull("the stats key belongs on the per-document copy, never on the map the workers share",
+                paramMap.get(Constants.CRAWLER_STATS_KEY));
         assertEquals("the dedup claim must stay namespaced", List.of(folderKey), recordingStore.releasedIds);
+    }
+
+    // --- newStatsParams: the crawler stats key belongs to one document, not to the shared map ---
+
+    /**
+     * {@code newStatsParams} copies rather than mutates, which is the property the end-to-end
+     * tests below rest on.
+     */
+    @Test
+    public void test_newStatsParams_copiesRatherThanMutating() {
+        final DataStoreParams paramMap = new DataStoreParams();
+        paramMap.put("root_folder_id", "999");
+        final StatsKeyObject statsKey = new StatsKeyObject("file-1");
+
+        final DataStoreParams localParams = dataStore.newStatsParams(paramMap, statsKey);
+
+        assertNotSame("a copy, not the same instance", paramMap, localParams);
+        assertNull("the original must not gain the key", paramMap.get(Constants.CRAWLER_STATS_KEY));
+        assertSame("the copy carries the key it was given", statsKey, localParams.get(Constants.CRAWLER_STATS_KEY));
+        // newInstance() copies the contents, so the ordinary parameters a callback or an ingester
+        // reads are still there -- the copy is not an empty map holding one key.
+        assertEquals("the copy carries the original's entries", "999", localParams.getAsString("root_folder_id"));
+
+        // A second copy of the same original is independent of the first, which is what makes
+        // concurrent workers safe rather than merely differently ordered.
+        final StatsKeyObject other = new StatsKeyObject("file-2");
+        final DataStoreParams otherParams = dataStore.newStatsParams(paramMap, other);
+        assertSame("the first copy keeps its own key", statsKey, localParams.get(Constants.CRAWLER_STATS_KEY));
+        assertSame("the second copy carries its own key", other, otherParams.get(Constants.CRAWLER_STATS_KEY));
+    }
+
+    /**
+     * Two documents crawled through one shared parameter map each arrive at the callback with
+     * their own parameter instance and their own stats key, and the shared map is never written.
+     *
+     * <p>
+     * This deliberately does not raise {@code number_of_threads}: a race reproduces unreliably,
+     * whereas "the shared map was never written to" and "each document brought its own instance"
+     * are exact properties that hold at any thread count and fail deterministically the moment a
+     * direct {@code paramMap.put} comes back.
+     * </p>
+     */
+    @Test
+    public void test_storeItem_eachDocumentGetsItsOwnParamsAndTheSharedMapIsUntouched() {
+        ComponentUtil.register(new SystemHelper(), "systemHelper");
+        final CrawlerStatsHelper crawlerStatsHelper = new CrawlerStatsHelper();
+        crawlerStatsHelper.init();
+        ComponentUtil.register(crawlerStatsHelper, "crawlerStatsHelper");
+        ComponentUtil.register(new FileTypeHelper(), "fileTypeHelper");
+
+        final RecordingBoxDataStore recordingStore = new RecordingBoxDataStore();
+        final Set<String> crawledIds = ConcurrentHashMap.newKeySet();
+        final ThrowingContentBoxClient client = new ThrowingContentBoxClient();
+        final BoxAclResolver aclResolver = new BoxAclResolver(List.of(), null);
+        final DataStoreParams paramMap = new DataStoreParams();
+        paramMap.put("root_folder_id", "999");
+        final BoxDataStore.Config config = new BoxDataStore.Config(paramMap);
+
+        final List<DataStoreParams> storedParams = new ArrayList<>();
+        final IndexUpdateCallback callback = new TestCallback() {
+            @Override
+            void test(final DataStoreParams p, final Map<String, Object> dataMap) {
+                // Deliberately the live reference, not a copy: the point of recording it is to
+                // let the assertions below name which instance arrived.
+                storedParams.add(p);
+            }
+        };
+
+        for (final String id : List.of("file-1", "file-2")) {
+            final String infoJson = "{\"type\":\"file\",\"id\":\"" + id + "\",\"name\":\"" + id + ".txt\",\"size\":100,"
+                    + "\"has_collaborations\":false,\"path_collection\":{\"total_count\":0,\"entries\":[]}}";
+            recordingStore.storeFile(new DataConfig(), callback, config, paramMap, new HashMap<>(), new HashMap<>(), client, aclResolver,
+                    crawledIds, new FakeBoxFile(id, infoJson));
+        }
+
+        assertNull("the stats key must never be written to the map the worker threads share", paramMap.get(Constants.CRAWLER_STATS_KEY));
+
+        assertEquals("both documents reach the callback", 2, storedParams.size());
+        assertNotSame("the two documents must not share one parameter instance", storedParams.get(0), storedParams.get(1));
+
+        final String[] expectedIds = { "file-1", "file-2" };
+        for (int i = 0; i < storedParams.size(); i++) {
+            final DataStoreParams localParams = storedParams.get(i);
+            assertNotSame("callback.store must receive the copy, not the shared instance", paramMap, localParams);
+
+            final Object value = localParams.get(Constants.CRAWLER_STATS_KEY);
+            assertNotNull("the copy must still carry the stats key the callback contract expects", value);
+            assertTrue("the stats key must be a StatsKeyObject, not its toString", value instanceof StatsKeyObject);
+            assertEquals("the stats key must identify this document", expectedIds[i], ((StatsKeyObject) value).getId());
+            assertEquals("the copy must carry the ordinary parameters too", "999", localParams.getAsString("root_folder_id"));
+        }
+    }
+
+    /**
+     * The stats key is no longer reachable from a crawl script.
+     *
+     * <p>
+     * {@link BoxDataStore#createResultMap} copies the shared parameter map into the script scope,
+     * so while the key was written there it was copied along with it, and under
+     * {@code number_of_threads > 1} the instance a script found could have belonged to a
+     * different document. Reaching it from real Groovy was only ever theoretical --
+     * {@code "crawler.stats.key"} contains dots, so the name resolves as property navigation
+     * rather than as a binding -- but {@code AbstractDataStore#convertValue} returns a value
+     * verbatim when the template matches a resultMap key exactly, which needs no script syntax at
+     * all. That is the path this asserts is now closed.
+     * </p>
+     */
+    @Test
+    public void test_storeItem_statsKeyNoLongerReachesTheScriptScope() {
+        ComponentUtil.register(new SystemHelper(), "systemHelper");
+        final CrawlerStatsHelper crawlerStatsHelper = new CrawlerStatsHelper();
+        crawlerStatsHelper.init();
+        ComponentUtil.register(crawlerStatsHelper, "crawlerStatsHelper");
+        ComponentUtil.register(new FileTypeHelper(), "fileTypeHelper");
+
+        // A stand-in for the Groovy engine that walks a dotted template as a path through the
+        // result map, so a template convertValue does NOT short-circuit still resolves the way a
+        // real engine would rather than throwing.
+        final ScriptEngineFactory scriptEngineFactory = new ScriptEngineFactory();
+        scriptEngineFactory.add("groovy", (template, resultMap) -> {
+            Object value = resultMap;
+            for (final String part : template.split("\\.")) {
+                if (!(value instanceof Map)) {
+                    return null;
+                }
+                value = ((Map<?, ?>) value).get(part);
+            }
+            return value;
+        });
+        ComponentUtil.register(scriptEngineFactory, "scriptEngineFactory");
+
+        final RecordingBoxDataStore recordingStore = new RecordingBoxDataStore();
+        final Set<String> crawledIds = ConcurrentHashMap.newKeySet();
+        final ThrowingContentBoxClient client = new ThrowingContentBoxClient();
+        final BoxAclResolver aclResolver = new BoxAclResolver(List.of(), null);
+        final DataStoreParams paramMap = new DataStoreParams();
+        final BoxDataStore.Config config = new BoxDataStore.Config(paramMap);
+
+        final Map<String, String> scriptMap = new HashMap<>();
+        scriptMap.put("stats_leak", Constants.CRAWLER_STATS_KEY);
+        scriptMap.put("name", "file.name");
+
+        final List<Map<String, Object>> stored = new ArrayList<>();
+        final String infoJson = "{\"type\":\"file\",\"id\":\"file-1\",\"name\":\"test.txt\",\"size\":100,"
+                + "\"has_collaborations\":false,\"path_collection\":{\"total_count\":0,\"entries\":[]}}";
+
+        recordingStore.storeFile(new DataConfig(), new TestCallback() {
+            @Override
+            void test(final DataStoreParams p, final Map<String, Object> dataMap) {
+                stored.add(dataMap);
+            }
+        }, config, paramMap, scriptMap, new HashMap<>(), client, aclResolver, crawledIds, new FakeBoxFile("file-1", infoJson));
+
+        assertEquals("the document is still indexed", 1, stored.size());
+        assertNull("internal crawl plumbing must not be indexable", stored.get(0).get("stats_leak"));
+        // The engine stub really did run and really can reach into the result map, so the null
+        // above is the key's absence rather than a script path that resolves nothing at all.
+        assertEquals("an ordinary script template still resolves", "test.txt", stored.get(0).get("name"));
     }
 
     // --- matchesUrlFilter: the shared skip logic buildFileMap and buildFolderMap both use ---
