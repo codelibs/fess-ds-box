@@ -156,16 +156,25 @@
 			<version>${utflute.version}</version>
 			<scope>test</scope>
 		</dependency>
+		<!-- box-java-sdk declares Jackson at runtime scope, so it is absent from the compile
+		     classpath, and this plugin's own code (BoxNoteParser, BoxDataStore) imports it
+		     directly. These declarations put it back.
+
+		     Deliberately ${jackson2.version}, not ${jackson.version}: fess-parent repointed
+		     jackson.version at Jackson 3, whose artifacts live under the tools.jackson.*
+		     groupIds, while box-java-sdk and this plugin both compile against Jackson 2 under
+		     com.fasterxml.jackson.*. Pairing the Jackson 2 groupId with jackson.version asks
+		     for an artifact that does not exist. -->
 		<dependency>
 			<groupId>com.fasterxml.jackson.core</groupId>
 			<artifactId>jackson-core</artifactId>
-			<version>${jackson.version}</version>
+			<version>${jackson2.version}</version>
 			<scope>provided</scope>
 		</dependency>
 		<dependency>
 			<groupId>com.fasterxml.jackson.core</groupId>
 			<artifactId>jackson-databind</artifactId>
-			<version>${jackson.version}</version>
+			<version>${jackson2.version}</version>
 			<scope>provided</scope>
 		</dependency>
 		<dependency>

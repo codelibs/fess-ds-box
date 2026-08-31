@@ -296,6 +296,46 @@ public class BoxDataStore extends AbstractDataStore {
         return resultMap;
     }
 
+    /**
+     * Returns a per-document copy of {@code paramMap} carrying {@code statsKey} under
+     * {@link Constants#CRAWLER_STATS_KEY}, for the single {@code callback.store} call that
+     * document makes.
+     *
+     * <p>
+     * The stats key identifies one document for statistics and logging; it is not crawl state to
+     * be shared. {@link #crawlFolder} dispatches {@link #storeFile} and {@link #storeFolder} to a
+     * pool of {@code number_of_threads} workers that all receive the same {@code paramMap}
+     * instance, and {@link #storeItem} writes the key and then reads it back one
+     * {@code callback.store} later, so writing it straight onto that instance lets one worker
+     * overwrite another's in between. The default {@code number_of_threads} is {@code 1}, which
+     * is why this is latent rather than visible, but the parameter exists to be raised. The
+     * single-threaded data stores write the key directly and are correct doing so -- fess-ds-csv,
+     * fess-ds-db, fess-ds-json and fess-ds-git declare no executor at all -- while the
+     * multi-threaded {@code ConfluenceDataStore} in fess-ds-atlassian takes this same copy.
+     * </p>
+     *
+     * <p>
+     * {@link DataStoreParams#newInstance()} is a genuine shallow copy, not a view, so the copy is
+     * invisible to the other workers while still carrying every ordinary parameter a callback or
+     * an ingester reads. One side effect is worth stating: because the key is now never written
+     * to the shared map, {@link #createResultMap} can no longer copy it into the script scope.
+     * Reaching it from real Groovy was only ever theoretical -- {@code "crawler.stats.key"}
+     * contains dots, so the name resolves as property navigation rather than as a binding -- but
+     * {@code AbstractDataStore#convertValue} returns a value verbatim when a script template
+     * matches a resultMap key exactly, so a scriptMap entry of {@code field=crawler.stats.key}
+     * did index the {@link StatsKeyObject} itself, with no script syntax involved at all.
+     * </p>
+     *
+     * @param paramMap the data store parameters shared by every worker thread
+     * @param statsKey the stats key identifying the one document about to be stored
+     * @return a copy of {@code paramMap} carrying {@code statsKey}
+     */
+    protected DataStoreParams newStatsParams(final DataStoreParams paramMap, final StatsKeyObject statsKey) {
+        final DataStoreParams localParams = paramMap.newInstance();
+        localParams.put(Constants.CRAWLER_STATS_KEY, statsKey);
+        return localParams;
+    }
+
     @Override
     public void storeData(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap) {
@@ -594,7 +634,7 @@ public class BoxDataStore extends AbstractDataStore {
         final CrawlerStatsHelper crawlerStatsHelper = ComponentUtil.getCrawlerStatsHelper();
         final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
         final StatsKeyObject statsKey = new StatsKeyObject(itemId);
-        paramMap.put(Constants.CRAWLER_STATS_KEY, statsKey);
+        final DataStoreParams localParams = newStatsParams(paramMap, statsKey);
         final DocumentQuality quality = new DocumentQuality();
         try {
             crawlerStatsHelper.begin(statsKey);
@@ -630,7 +670,7 @@ public class BoxDataStore extends AbstractDataStore {
                 statsKey.setUrl(statsUrl);
             }
 
-            callback.store(paramMap, dataMap);
+            callback.store(localParams, dataMap);
             crawlerStatsHelper.record(statsKey, StatsAction.FINISHED);
             if (quality.isDegraded()) {
                 releaseCrawled(crawledIds, itemKey);
