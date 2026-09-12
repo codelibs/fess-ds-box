@@ -45,10 +45,29 @@
 							<artifactSet>
 								<includes>
 									<include>com.box:box-java-sdk</include>
+									<include>com.squareup.okhttp3:okhttp-jvm</include>
+									<include>com.squareup.okio:okio-jvm</include>
+									<include>org.jetbrains.kotlin:kotlin-stdlib</include>
 									<include>com.eclipsesource.minimal-json:minimal-json</include>
 									<include>org.bitbucket.b_c:jose4j</include>
 								</includes>
 							</artifactSet>
+							<filters>
+								<filter>
+									<artifact>*:*</artifact>
+									<excludes>
+										<exclude>META-INF/MANIFEST.MF</exclude>
+										<exclude>META-INF/LICENSE</exclude>
+										<exclude>META-INF/*.SF</exclude>
+										<exclude>META-INF/*.DSA</exclude>
+										<exclude>META-INF/*.RSA</exclude>
+										<!-- kotlin-stdlib and okio are modular; a module descriptor from one
+										     of them at the root of this jar would describe the wrong module. -->
+										<exclude>module-info.class</exclude>
+										<exclude>META-INF/versions/*/module-info.class</exclude>
+									</excludes>
+								</filter>
+							</filters>
 						</configuration>
 					</execution>
 				</executions>
@@ -181,6 +200,27 @@
 			<groupId>com.box</groupId>
 			<artifactId>box-java-sdk</artifactId>
 			<version>${box.version}</version>
+			<exclusions>
+				<!-- box-java-sdk asks for okhttp 4.12.0, but it has never run on it here: Fess
+				     carried okhttp-jvm 5.x in WEB-INF/lib, which precedes WEB-INF/plugin on
+				     every class path, so 5.x is what the SDK has been getting. Keep that, now
+				     from the copy declared below and shaded into this jar, and drop 4.12.0 so
+				     the two cannot both be present. Its kotlin-stdlib-jdk7 and -jdk8 go with
+				     it; kotlin-stdlib 2.x absorbed both. -->
+				<exclusion>
+					<groupId>com.squareup.okhttp3</groupId>
+					<artifactId>okhttp</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<dependency>
+			<!-- 17 classes of box-java-sdk call okhttp - BoxAPIConnection, BoxAPIRequest and
+			     the multipart requests among them - so the SDK cannot work without it. Fess
+			     supplied it until 15.9; it travels in the plugin jar now, so an installation
+			     that does not crawl Box does not pay for it. -->
+			<groupId>com.squareup.okhttp3</groupId>
+			<artifactId>okhttp-jvm</artifactId>
+			<version>${okhttp.version}</version>
 		</dependency>
 	</dependencies>
 </project>
