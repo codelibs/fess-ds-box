@@ -18,6 +18,8 @@ package org.codelibs.fess.ds.box;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 
+import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -606,6 +608,54 @@ public class BoxClientTest extends UnitDsTestCase {
                 messages.add(event.getMessage().getFormattedMessage());
             }
         }
+    }
+
+    // --- createConnection: the failure message keeps the cause ---
+
+    private BoxClient newFailingClient(final RuntimeException failure) {
+        final SeamBoxClient client = new SeamBoxClient() {
+            @Override
+            protected BoxAPIConnection newConnection() {
+                throw failure;
+            }
+        };
+        client.setInitParameterMap(new HashMap<>());
+        client.boxConfig = new BoxConfig("cid", "secret", "ent", new JWTEncryptionPreferences());
+        client.accessTokenCache = new InMemoryLRUAccessTokenCache(8);
+        return client;
+    }
+
+    @Test
+    public void test_createConnection_boxApiExceptionKeepsCause() {
+        final BoxAPIException failure =
+                new BoxAPIException("Couldn't connect to the Box API due to a network error.", new SocketException("Connection reset"));
+        try {
+            newFailingClient(failure).createConnection();
+            fail();
+        } catch (final DataStoreException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("Failed to create new connection"));
+            assertTrue(e.getMessage(), e.getMessage().contains("java.net.SocketException: Connection reset"));
+            assertSame(failure, e.getCause());
+        }
+    }
+
+    @Test
+    public void test_createConnection_otherExceptionKeepsCause() {
+        final RuntimeException failure = new RuntimeException("wrapper", new SocketTimeoutException("Read timed out"));
+        try {
+            newFailingClient(failure).createConnection();
+            fail();
+        } catch (final DataStoreException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("Failed to create new connection"));
+            assertTrue(e.getMessage(), e.getMessage().contains("java.net.SocketTimeoutException: Read timed out"));
+            assertSame(failure, e.getCause());
+        }
+    }
+
+    @Test
+    public void test_describeCause_isSingleLine() {
+        final String text = BoxClient.describeCause(new BoxAPIException("bad json\n{\"huge\": \"body\"}"));
+        assertEquals("com.box.sdk.BoxAPIException: bad json", text);
     }
 
     // --- forUser / createConnection: per-user identity isolation ---
