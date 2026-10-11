@@ -237,9 +237,9 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
             }
         } catch (final BoxAPIException e) {
             throw new DataStoreException("Failed to create new connection. Box API Error : responseCode = " + e.getResponseCode()
-                    + ", response = " + e.getResponse());
+                    + ", response = " + e.getResponse() + ", cause = " + describeCause(e), e);
         } catch (final Exception e) {
-            throw new DataStoreException("Failed to create new connection.", e);
+            throw new DataStoreException("Failed to create new connection. cause = " + describeCause(e), e);
         }
 
         if (impersonatedUserId == null) {
@@ -264,6 +264,36 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
                 }
             }, Integer.parseInt(getInitParameter(REFRESH_TOKEN_INTERVAL_PARAM, DEFAULT_REFRESH_TOKEN_INTERVAL)), true);
         }
+    }
+
+    /**
+     * Describes an exception for a log message: its class and message, followed by the root cause
+     * when there is a different one. A timeout, a connection reset or an unparsable response is
+     * reported by the Box SDK with no response code and no response body, so without this the
+     * message would not say what went wrong.
+     *
+     * @param e the exception to describe
+     * @return a single-line description
+     */
+    protected static String describeCause(final Throwable e) {
+        final Set<Throwable> seen = new HashSet<>();
+        Throwable root = e;
+        while (root.getCause() != null && seen.add(root)) {
+            root = root.getCause();
+        }
+        final StringBuilder buf = new StringBuilder(e.getClass().getName()).append(": ").append(firstLine(e.getMessage()));
+        if (root != e) {
+            buf.append(" (root cause: ").append(root.getClass().getName()).append(": ").append(firstLine(root.getMessage())).append(')');
+        }
+        return buf.toString();
+    }
+
+    private static String firstLine(final String message) {
+        if (message == null) {
+            return "null";
+        }
+        final int pos = message.indexOf('\n');
+        return pos < 0 ? message : message.substring(0, pos);
     }
 
     /**
