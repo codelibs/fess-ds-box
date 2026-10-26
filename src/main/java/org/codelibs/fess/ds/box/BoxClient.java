@@ -267,25 +267,33 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
     }
 
     /**
-     * Describes an exception for a log message: its class and message, followed by the root cause
-     * when there is a different one. A timeout, a connection reset or an unparsable response is
-     * reported by the Box SDK with no response code and no response body, so without this the
-     * message would not say what went wrong.
+     * Describes an exception for a log message: its class and message, followed by every cause in
+     * its chain. A timeout, a connection reset or an unparsable response is reported by the Box SDK
+     * with no response code and no response body, so without this the message would not say what
+     * went wrong. The whole chain is listed, not only the deepest cause, because that one can hide
+     * the reason: a read timeout reaches the SDK as a {@link java.net.SocketTimeoutException}, whose
+     * own cause is a {@code SocketException: Socket closed} left by the cancelled call.
      *
      * @param e the exception to describe
      * @return a single-line description
      */
     protected static String describeCause(final Throwable e) {
         final Set<Throwable> seen = new HashSet<>();
-        Throwable root = e;
-        while (root.getCause() != null && seen.add(root)) {
-            root = root.getCause();
+        seen.add(e);
+        final StringBuilder buf = new StringBuilder(describeOne(e));
+        boolean first = true;
+        for (Throwable cause = e.getCause(); cause != null && seen.add(cause); cause = cause.getCause()) {
+            buf.append(first ? " (caused by: " : " -> ").append(describeOne(cause));
+            first = false;
         }
-        final StringBuilder buf = new StringBuilder(e.getClass().getName()).append(": ").append(firstLine(e.getMessage()));
-        if (root != e) {
-            buf.append(" (root cause: ").append(root.getClass().getName()).append(": ").append(firstLine(root.getMessage())).append(')');
+        if (!first) {
+            buf.append(')');
         }
         return buf.toString();
+    }
+
+    private static String describeOne(final Throwable e) {
+        return e.getClass().getName() + ": " + firstLine(e.getMessage());
     }
 
     private static String firstLine(final String message) {

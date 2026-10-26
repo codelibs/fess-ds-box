@@ -653,6 +653,32 @@ public class BoxClientTest extends UnitDsTestCase {
     }
 
     @Test
+    public void test_describeCause_listsEveryCauseInTheChain() {
+        // What the SDK reports for a read timeout: the timeout is the middle link, and the call it
+        // cancelled leaves "Socket closed" as the deepest one.
+        final SocketTimeoutException timeout = new SocketTimeoutException("timeout");
+        timeout.initCause(new SocketException("Socket closed"));
+        final BoxAPIException failure = new BoxAPIException("Couldn't connect to the Box API due to a network error.", timeout);
+        assertEquals(
+                "com.box.sdk.BoxAPIException: Couldn't connect to the Box API due to a network error."
+                        + " (caused by: java.net.SocketTimeoutException: timeout -> java.net.SocketException: Socket closed)",
+                BoxClient.describeCause(failure));
+    }
+
+    @Test
+    public void test_describeCause_withoutCauseHasNoSuffix() {
+        assertEquals("java.lang.IllegalStateException: boom", BoxClient.describeCause(new IllegalStateException("boom")));
+    }
+
+    @Test
+    public void test_describeCause_survivesACauseCycle() {
+        final RuntimeException a = new RuntimeException("a");
+        final RuntimeException b = new RuntimeException("b", a);
+        a.initCause(b);
+        assertEquals("java.lang.RuntimeException: b (caused by: java.lang.RuntimeException: a)", BoxClient.describeCause(b));
+    }
+
+    @Test
     public void test_describeCause_isSingleLine() {
         final String text = BoxClient.describeCause(new BoxAPIException("bad json\n{\"huge\": \"body\"}"));
         assertEquals("com.box.sdk.BoxAPIException: bad json", text);
