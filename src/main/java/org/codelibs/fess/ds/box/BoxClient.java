@@ -47,6 +47,7 @@ import com.box.sdk.BoxFile;
 import com.box.sdk.BoxFolder;
 import com.box.sdk.BoxItem;
 import com.box.sdk.BoxUser;
+import com.box.sdk.DeveloperEditionEntityType;
 import com.box.sdk.EncryptionAlgorithm;
 import com.box.sdk.IAccessTokenCache;
 import com.box.sdk.InMemoryLRUAccessTokenCache;
@@ -225,6 +226,7 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
         try {
             final BoxAPIConnection con = newConnection();
             configureConnection(con);
+            authenticate(con);
             if (impersonatedUserId != null) {
                 // This client is one forUser() handed out. A rebuild (e.g. the 401 retry in
                 // getFiles()) must keep impersonating the same user - otherwise every request
@@ -305,18 +307,37 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
     }
 
     /**
-     * Opens a new, unconfigured connection to Box for this client's app.
+     * Opens a new, unconfigured and not yet authenticated connection to Box for this client's app.
      *
-     * <p>The only method in this class that talks to Box before any request is made, and the
-     * single place {@link #createConnection()} and {@link #forUser(String)} both go through, so
-     * that the identity wiring built on top of it - {@code configureConnection}, the
-     * {@code asUser} call and its re-application after a rebuild - can be exercised without a
-     * live tenant.</p>
+     * <p>The single place {@link #createConnection()} and {@link #forUser(String)} both go through,
+     * so that the identity wiring built on top of it - {@code configureConnection},
+     * {@link #authenticate(BoxAPIConnection)}, the {@code asUser} call and its re-application after
+     * a rebuild - can be exercised without a live tenant.</p>
      *
-     * @return a new connection authenticated as the enterprise service account
+     * <p>The SDK's {@code getAppEnterpriseConnection} factory cannot be used here: when the token
+     * cache has no entry yet it exchanges the JWT before it returns, i.e. before
+     * {@link #configureConnection(BoxAPIConnection)} could apply the proxy and the connect/read
+     * timeouts, so the first exchange would ignore them and wait without limit on a Box endpoint
+     * that does not answer.</p>
+     *
+     * @return a new connection for the enterprise service account
      */
     protected BoxAPIConnection newConnection() {
-        return BoxDeveloperEditionAPIConnection.getAppEnterpriseConnection(boxConfig, accessTokenCache);
+        return new BoxDeveloperEditionAPIConnection(boxConfig.getEnterpriseId(), DeveloperEditionEntityType.ENTERPRISE, boxConfig,
+                accessTokenCache);
+    }
+
+    /**
+     * Obtains the access token of a configured connection: restores it from the shared token cache,
+     * or exchanges the JWT when the cache has none.
+     *
+     * @param con the connection returned by {@link #newConnection()} and configured by
+     *        {@link #configureConnection(BoxAPIConnection)}
+     */
+    protected void authenticate(final BoxAPIConnection con) {
+        if (con instanceof final BoxDeveloperEditionAPIConnection devCon) {
+            devCon.tryRestoreUsingAccessTokenCache();
+        }
     }
 
     /**
@@ -624,6 +645,7 @@ public class BoxClient extends AbstractCrawlerClient implements AutoCloseable {
         userClient.setInitParameterMap(initParamMap);
         final BoxAPIConnection con = newConnection();
         configureConnection(con);
+        authenticate(con);
         con.asUser(userId);
         userClient.connection = con;
         return userClient;
