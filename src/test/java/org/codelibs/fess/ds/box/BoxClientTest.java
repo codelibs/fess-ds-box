@@ -18,6 +18,10 @@ package org.codelibs.fess.ds.box;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 
+import java.io.StringWriter;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.util.ArrayList;
@@ -25,6 +29,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.security.KeyPairGenerator;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 
 import org.apache.logging.log4j.Level;
@@ -33,6 +41,11 @@ import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.Logger;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.apache.logging.log4j.core.config.Property;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.openssl.PKCS8Generator;
+import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
+import org.bouncycastle.openssl.jcajce.JcaPKCS8Generator;
+import org.bouncycastle.openssl.jcajce.JceOpenSSLPKCS8EncryptorBuilder;
 import org.codelibs.fess.crawler.client.AbstractCrawlerClient;
 import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.ds.box.UnitDsTestCase;
@@ -682,6 +695,88 @@ public class BoxClientTest extends UnitDsTestCase {
     public void test_describeCause_isSingleLine() {
         final String text = BoxClient.describeCause(new BoxAPIException("bad json\n{\"huge\": \"body\"}"));
         assertEquals("com.box.sdk.BoxAPIException: bad json", text);
+    }
+
+    // --- init: the first token exchange honours connect_timeout / read_timeout ---
+
+    /**
+     * Box's token endpoint accepts the connection and then never answers. The SDK exchanges the
+     * JWT for the first access token before it returns the connection, so the configured timeouts
+     * have to be on the connection by then; otherwise init() waits without limit. The proxy
+     * system properties send the SDK's request for api.box.com to a local socket instead.
+     */
+    @Test
+    public void test_init_firstTokenExchangeHonoursConfiguredTimeouts() throws Exception {
+        final StringWriter pem = new StringWriter();
+        final KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+        generator.initialize(2048);
+        try (JcaPEMWriter writer = new JcaPEMWriter(pem)) {
+            writer.writeObject(new JcaPKCS8Generator(generator.generateKeyPair().getPrivate(),
+                    new JceOpenSSLPKCS8EncryptorBuilder(PKCS8Generator.AES_256_CBC).setPasssword("test_passphrase".toCharArray())
+                            .setProvider(new BouncyCastleProvider())
+                            .build()));
+        }
+
+        final Map<String, Object> params = createValidParams();
+        params.put("private_key", pem.toString());
+        params.put("connect_timeout", "500");
+        params.put("read_timeout", "500");
+        final BoxClient client = new BoxClient();
+        client.setInitParameterMap(params);
+
+        final String oldHost = System.getProperty("https.proxyHost");
+        final String oldPort = System.getProperty("https.proxyPort");
+        try (ServerSocket proxy = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+            final List<Socket> accepted = new ArrayList<>();
+            final Thread acceptor = new Thread(() -> {
+                try {
+                    while (true) {
+                        final Socket socket = proxy.accept();
+                        accepted.add(socket);
+                        // Let the CONNECT tunnel open, then leave the TLS handshake unanswered.
+                        socket.getOutputStream().write("HTTP/1.1 200 Connection established\r\n\r\n".getBytes());
+                        socket.getOutputStream().flush();
+                    }
+                } catch (final Exception e) {
+                    // the proxy was closed
+                }
+            });
+            acceptor.setDaemon(true);
+            acceptor.start();
+            System.setProperty("https.proxyHost", proxy.getInetAddress().getHostAddress());
+            System.setProperty("https.proxyPort", String.valueOf(proxy.getLocalPort()));
+
+            final CompletableFuture<Throwable> result = CompletableFuture.supplyAsync(() -> {
+                try {
+                    client.init();
+                    return null;
+                } catch (final Throwable t) {
+                    return t;
+                }
+            });
+            try {
+                final Throwable failure = result.get(20, TimeUnit.SECONDS);
+                assertTrue(String.valueOf(failure), failure instanceof DataStoreException);
+                assertTrue(failure.getMessage(), failure.getMessage().contains("SocketTimeoutException"));
+            } catch (final TimeoutException e) {
+                fail("the first token exchange ignored connect_timeout / read_timeout and is still waiting");
+            } finally {
+                for (final Socket socket : new ArrayList<>(accepted)) {
+                    socket.close();
+                }
+            }
+        } finally {
+            restoreProperty("https.proxyHost", oldHost);
+            restoreProperty("https.proxyPort", oldPort);
+        }
+    }
+
+    private static void restoreProperty(final String key, final String value) {
+        if (value == null) {
+            System.clearProperty(key);
+        } else {
+            System.setProperty(key, value);
+        }
     }
 
     // --- forUser / createConnection: per-user identity isolation ---
