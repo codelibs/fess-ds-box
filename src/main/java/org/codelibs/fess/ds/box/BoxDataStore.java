@@ -1147,6 +1147,14 @@ public class BoxDataStore extends AbstractDataStore {
      * to be skipped entirely.
      */
     protected static class DocumentQuality {
+
+        /**
+         * Default constructor.
+         */
+        protected DocumentQuality() {
+            // nothing to do
+        }
+
         boolean contentDegraded = false;
         boolean aclDegraded = false;
 
