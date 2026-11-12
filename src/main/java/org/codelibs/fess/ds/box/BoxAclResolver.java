@@ -135,6 +135,14 @@ public class BoxAclResolver {
         return getFolderRoles(client, folderId, null);
     }
 
+    /**
+     * Returns the search roles of a folder, reading it at most once and recording a failed read on the quality.
+     *
+     * @param client the client to read the folder's collaborations with
+     * @param folderId the folder identifier
+     * @param quality the quality of the document being crawled, marked degraded when the roles cannot be read; may be null
+     * @return the folder's search roles
+     */
     protected List<String> getFolderRoles(final BoxClient client, final String folderId, final DocumentQuality quality) {
         final List<String> roles = folderRoleCache.computeIfAbsent(folderId, id -> loadFolderRoles(client, id, quality));
         return roles != null ? roles : List.of();
